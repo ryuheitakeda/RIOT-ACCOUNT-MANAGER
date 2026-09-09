@@ -1,0 +1,20 @@
+**/bin/
+**/obj/
+artifacts/
+.vs/
+*.user
+*.db*
+*.log
+TestResults/
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+.idea/
+
+# Private local planning and handoff notes
+/PLAN.md
+/STATUS.md
