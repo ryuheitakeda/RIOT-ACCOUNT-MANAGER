@@ -119,38 +119,27 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
     public async Task RefreshAnalysisAsync(RiotAccount account, string queue, int count, IProgress<string> progress, CancellationToken cancellationToken)
     {
         if (count is not (20 or 50)) throw new ArgumentOutOfRangeException(nameof(count));
-        var queueId = Queues.Id(queue);
-        progress.Report("アカウントとランクを取得中…");
-        await RefreshRanksAsync(account, cancellationToken, progress);
-        account = store.Accounts().Single(a => a.Id == account.Id);
+        var definition = Queues.Get(queue);
+        progress.Report(definition.IsRanked ? "アカウントとランクを取得中…" : "アカウントを確認中…");
+        if (definition.IsRanked)
+        {
+            await RefreshRanksAsync(account, cancellationToken, progress);
+            account = store.Accounts().Single(a => a.Id == account.Id);
+        }
+        else account = await Resolve(account, cancellationToken, progress);
         var cache = store.Cache(account.Id);
         var profile = account.Lol;
-        var ids = await api.GetAsync<List<string>>(Regions.Regional(profile.Platform),
-            $"/lol/match/v5/matches/by-puuid/{Uri.EscapeDataString(profile.Puuid!)}/ids?queue={queueId}&start=0&count={count}", cancellationToken, progress);
-        foreach (var (id, index) in ids.Distinct().Select((id, index) => (id, index)))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (cache.Matches.Any(m => m.Id == id)) continue;
-            progress.Report($"試合履歴を取得中 {index + 1}/{ids.Count}");
-            using var json = await api.GetAsync<JsonDocument>(Regions.Regional(profile.Platform),
-                $"/lol/match/v5/matches/{Uri.EscapeDataString(id)}", cancellationToken, progress);
-            MatchRecord match;
-            try { match = ParseMatch(json.RootElement); }
-            catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException or ArgumentOutOfRangeException)
-            {
-                throw new RiotApiException("試合データの形式が不正です。保存済みデータを表示しています。");
-            }
-            if (match.Id != id || match.QueueId != queueId || match.Participants.Count(p => p.Puuid == profile.Puuid) != 1)
-                throw new RiotApiException("試合のアカウントまたはキューが一致しません。保存済みデータを表示しています。");
-            cancellationToken.ThrowIfCancellationRequested();
-            cache.Matches.Add(match);
-            store.SaveCache(account.Id, cache);
-        }
+        var fetched = await RefreshMatches(account, definition, count, cache, progress, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         var now = DateTimeOffset.UtcNow;
         cache.MatchesUpdatedAt = now;
         cache.QueueUpdatedAt[queue] = now;
         store.SaveCache(account.Id, cache);
+        if (!definition.IsRanked)
+        {
+            progress.Report($"ノーマルの戦績を更新しました（{fetched}/{count}戦）。");
+            return;
+        }
         var recent = Analytics.Recent(cache, profile.Puuid!, queue, int.MaxValue)
             .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(20);
         var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
@@ -173,6 +162,89 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         cache.Forecasts.Add(Analytics.Predict(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow));
         store.SaveCache(account.Id, cache);
         progress.Report("戦績・分析を更新しました。");
+    }
+
+    private sealed class MatchHistory(int queueId)
+    {
+        public int QueueId { get; } = queueId;
+        public int Start { get; set; }
+        public bool Exhausted { get; set; }
+        public Queue<string> Pending { get; } = new();
+        public HashSet<string> Seen { get; } = new(StringComparer.Ordinal);
+        public MatchRecord? Current { get; set; }
+    }
+
+    private async Task<int> RefreshMatches(RiotAccount account, QueueDefinition definition, int count,
+        AccountCache cache, IProgress<string> progress, CancellationToken ct)
+    {
+        var profile = account.Lol;
+        var host = Regions.Regional(profile.Platform);
+        var histories = definition.QueueIds.Select(id => new MatchHistory(id)).ToList();
+        var known = cache.Matches.DistinctBy(m => m.Id).ToDictionary(m => m.Id, StringComparer.Ordinal);
+        var selected = new HashSet<string>(StringComparer.Ordinal);
+        var downloaded = 0;
+
+        async Task<MatchRecord?> Next(MatchHistory history)
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (history.Pending.Count == 0)
+                {
+                    if (history.Exhausted) return null;
+                    var ids = await api.GetAsync<List<string>>(host,
+                        $"/lol/match/v5/matches/by-puuid/{Uri.EscapeDataString(profile.Puuid!)}/ids?queue={history.QueueId}&start={history.Start}&count={count}", ct, progress);
+                    if (ids.Count > count || ids.Any(string.IsNullOrWhiteSpace))
+                        throw new RiotApiException("試合一覧の形式が不正です。保存済みデータを表示しています。");
+                    history.Start += ids.Count;
+                    history.Exhausted = ids.Count < count;
+                    foreach (var id in ids)
+                        if (history.Seen.Add(id)) history.Pending.Enqueue(id);
+                    if (history.Pending.Count == 0)
+                    {
+                        if (history.Exhausted) return null;
+                        throw new RiotApiException("試合一覧が重複しているため取得を中断しました。保存済みデータを表示しています。");
+                    }
+                }
+                var matchId = history.Pending.Dequeue();
+                var cached = known.TryGetValue(matchId, out var match);
+                if (!cached)
+                {
+                    progress.Report($"試合履歴を取得中（{++downloaded}件目）…");
+                    using var json = await api.GetAsync<JsonDocument>(host,
+                        $"/lol/match/v5/matches/{Uri.EscapeDataString(matchId)}", ct, progress);
+                    try { match = ParseMatch(json.RootElement); }
+                    catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException or ArgumentOutOfRangeException or OverflowException)
+                    {
+                        throw new RiotApiException("試合データの形式が不正です。保存済みデータを表示しています。");
+                    }
+                }
+                if (match!.Id != matchId || match.QueueId != history.QueueId || match.Participants.Count(p => p.Puuid == profile.Puuid) != 1)
+                    throw new RiotApiException("試合のアカウントまたはキューが一致しません。保存済みデータを表示しています。");
+                ct.ThrowIfCancellationRequested();
+                if (!cached)
+                {
+                    cache.Matches.Add(match);
+                    known.Add(match.Id, match);
+                    store.SaveCache(account.Id, cache);
+                }
+                if (!match.Remake && match.DurationSeconds > 0) return match;
+            }
+        }
+
+        // Each queue's IDs are newest first. Merge its next eligible match by timestamp,
+        // fetching only the selected matches plus at most one lookahead per other queue.
+        foreach (var history in histories) history.Current = await Next(history);
+        while (selected.Count < count)
+        {
+            ct.ThrowIfCancellationRequested();
+            var history = histories.Where(h => h.Current != null).MaxBy(h => h.Current!.StartedAt);
+            if (history is null) break;
+            selected.Add(history.Current!.Id);
+            history.Current = null;
+            if (selected.Count < count) history.Current = await Next(history);
+        }
+        return selected.Count;
     }
 
     public static MatchRecord ParseMatch(JsonElement root)

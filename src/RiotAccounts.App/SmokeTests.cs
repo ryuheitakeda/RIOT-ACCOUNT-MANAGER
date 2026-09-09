@@ -21,6 +21,7 @@ internal static class SmokeTests
             Check(report, "DPAPI CurrentUser roundtrip and tamper rejection", TestDpapi);
             Check(report, "SQLite persist/reopen/edit/delete and encrypted database/WAL", () => TestStore(directory));
             Check(report, "WPF main window and account/settings dialogs construct with dummy data", () => TestWindows(directory, artifactDirectory));
+            Check(report, "WPF normal match history/statistics and ranked/normal tab switching", () => TestNormalWindows(directory, artifactDirectory));
             Check(report, "Windows INPUT ABI and synthetic calibration image comparison", TestNativeHelpers);
             Check(report, "Calibration rejects size/DPI/version/legacy/bounds changes", TestCalibrationGeometry);
         }
@@ -189,6 +190,112 @@ internal static class SmokeTests
         }
     }
 
+    private static void TestNormalWindows(string directory, string? artifactDirectory)
+    {
+        var application = System.Windows.Application.Current;
+        var shutdownMode = application.ShutdownMode;
+        application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        MainWindow? window = null;
+        try
+        {
+            var store = new Store(Path.Combine(directory, "normal-ui.db"), new WindowsProtector());
+            const string puuid = "normal-ui-dummy-puuid";
+            var now = DateTimeOffset.UtcNow;
+            var account = new RiotAccount(Guid.NewGuid(), "ノーマル表示検証", [new("lol", "Dummy", "JP1", "JP1", puuid)]);
+            store.Save(account, new Credentials("normal-ui-dummy-user", "normal-ui-dummy-password"));
+            var normal = Queues.Definitions.Single(queue => queue.Key == Queues.Normal);
+            Require(!normal.IsRanked && normal.QueueIds.Count() == 4);
+            var normalMatches = normal.QueueIds.Select((queueId, index) => new MatchRecord(
+                "dummy-normal-" + queueId, queueId, now.AddMinutes(-index * 40), 1800, false,
+                [new(puuid, 100, index % 2 == 0 ? "Ahri" : "Lux", index % 2 == 0 ? "MIDDLE" : "SUPPORT", 5, 2, 8, 180, 20, index % 2 == 0)])).ToList();
+            store.Write("cache", account.Id.ToString(), new AccountCache
+            {
+                Ranks = [new(now, [new(Queues.Solo, "GOLD", "IV", 25, 3, 2), new(Queues.Flex, "SILVER", "II", 60, 2, 4)])],
+                Forecasts = [new(Queues.Solo, now, 10, 40, 50, "GOLD IV", "GOLD II", "PLATINUM IV", "ダミーのランク予測")],
+                QueueUpdatedAt = new() { [Queues.Normal] = now, [Queues.Solo] = now, [Queues.Flex] = now },
+                Matches = [.. normalMatches,
+                    new("dummy-ranked-solo", 420, now.AddMinutes(-10), 1800, false, [new(puuid, 100, "Caitlyn", "BOTTOM", 2, 5, 3, 150, 10, false)]),
+                    new("dummy-ranked-flex", 440, now.AddMinutes(-20), 1800, false, [new(puuid, 100, "Leona", "SUPPORT", 2, 5, 3, 150, 10, false)]),
+                    new("dummy-aram", 450, now.AddMinutes(-30), 1800, false, [new(puuid, 100, "Braum", "", 2, 5, 3, 150, 10, false)])]
+            });
+            window = new MainWindow(store, directory);
+            var queuePicker = Control<ComboBox>("QueuePicker");
+            var tabs = Control<TabControl>("DetailTabs");
+            var overview = Control<TabItem>("OverviewTab");
+            var history = Control<TabItem>("HistoryTab");
+            var matches = Control<DataGrid>("MatchesGrid");
+
+            Require(queuePicker.Items.Count == 3);
+            Require(Control<TextBlock>("RankTitle").Text.Contains("GOLD IV", StringComparison.Ordinal));
+            Require(Control<TextBlock>("ForecastRange").Text.Contains("PLATINUM IV", StringComparison.Ordinal));
+            tabs.SelectedItem = history;
+            queuePicker.SelectedItem = normal;
+            VerifyNormal();
+            Require(tabs.SelectedItem == overview);
+
+            queuePicker.SelectedItem = Queues.Definitions.Single(queue => queue.Key == Queues.Solo);
+            Require(Control<FrameworkElement>("RankedSummaryPanel").Visibility == Visibility.Visible);
+            Require(Control<FrameworkElement>("ForecastPanel").Visibility == Visibility.Visible);
+            Require(history.Visibility == Visibility.Visible);
+            Require(Control<TextBlock>("NormalModeText").Visibility == Visibility.Collapsed);
+            Require(Control<TextBlock>("RankTitle").Text.Contains("GOLD IV", StringComparison.Ordinal));
+            Require(matches.Items.Count == 1 && Cell(matches.Items[0], "Champion") == "Caitlyn");
+            Require(Control<ListBox>("HistoryList").Items.Count == 1);
+
+            queuePicker.SelectedItem = Queues.Definitions.Single(queue => queue.Key == Queues.Flex);
+            Require(Control<TextBlock>("RankTitle").Text.Contains("SILVER II", StringComparison.Ordinal));
+            Require(matches.Items.Count == 1 && Cell(matches.Items[0], "Champion") == "Leona");
+            tabs.SelectedItem = history;
+            queuePicker.SelectedItem = normal;
+            VerifyNormal();
+            Require(tabs.SelectedItem == overview);
+            if (artifactDirectory != null)
+            {
+                Directory.CreateDirectory(artifactDirectory);
+                Render(window, Path.Combine(artifactDirectory, "self-test-normal.png"));
+                tabs.SelectedItem = Control<TabItem>("MatchesTab");
+                Render(window, Path.Combine(artifactDirectory, "self-test-normal-matches.png"));
+            }
+
+            T Control<T>(string name) where T : FrameworkElement => window.FindName(name) as T
+                ?? throw new InvalidOperationException("Missing self-test control: " + name);
+
+            void VerifyNormal()
+            {
+                Require(Control<FrameworkElement>("RankedSummaryPanel").Visibility == Visibility.Collapsed);
+                Require(Control<FrameworkElement>("ForecastPanel").Visibility == Visibility.Collapsed);
+                Require(history.Visibility == Visibility.Collapsed);
+                Require(Control<TextBlock>("NormalModeText").Visibility == Visibility.Visible);
+                foreach (var name in new[] { "RankTitle", "RankRecord", "RankTime", "ForecastRange", "ForecastDetails" })
+                    Require(string.IsNullOrEmpty(Control<TextBlock>(name).Text));
+                Require(Control<ListBox>("HistoryList").Items.Count == 0);
+                Require(matches.Items.Count == 4);
+                var expectedModes = normalMatches.Select(match => Queues.MatchName(match.QueueId)).ToHashSet(StringComparer.Ordinal);
+                Require(matches.Items.Cast<object>().Select(row => Cell(row, "Mode")).ToHashSet(StringComparer.Ordinal).SetEquals(expectedModes));
+                Require(matches.Items.Cast<object>().Select(row => Cell(row, "Champion")).ToHashSet(StringComparer.Ordinal).SetEquals(["Ahri", "Lux"]));
+                Require(matches.Columns.OfType<DataGridTextColumn>().Any(column => column.Binding is System.Windows.Data.Binding { Path.Path: "Mode" }));
+                Require(Control<TextBlock>("PerformanceText").Text.StartsWith("4戦  2勝 2敗", StringComparison.Ordinal));
+                Require(!Control<TextBlock>("UpdatedText").Text.Contains("未取得", StringComparison.Ordinal));
+                var champions = Control<ItemsControl>("ChampionStats").Items.Cast<Performance>().ToList();
+                Require(champions.Count == 2 && champions.All(stat => stat.Games == 2));
+                Require(champions.Single(stat => stat.Name == "Ahri").Wins == 2);
+                Require(champions.Single(stat => stat.Name == "Lux").Wins == 0);
+                var roles = Control<ItemsControl>("RoleStats").Items.Cast<Performance>().ToList();
+                Require(roles.Count == 2 && roles.All(stat => stat.Games == 2));
+                Require(roles.Single(stat => stat.Name == "MIDDLE").Wins == 2);
+                Require(roles.Single(stat => stat.Name == "SUPPORT").Wins == 0);
+            }
+        }
+        finally
+        {
+            window?.Close();
+            application.ShutdownMode = shutdownMode;
+        }
+
+        static string Cell(object row, string property) => row.GetType().GetProperty(property)?.GetValue(row) as string
+            ?? throw new InvalidOperationException("Missing self-test row field: " + property);
+    }
+
     private static void Render(Window window, string file)
     {
         var width = window is MainWindow ? 1220 : (int)window.Width;
@@ -197,26 +304,34 @@ internal static class SmokeTests
         // Render an isolated visual tree; no native window, screen capture, or focus changes.
         window.Content = null;
         var surface = new Border { Background = window.Background, Child = content, Width = width, FlowDirection = window.FlowDirection, Language = window.Language };
-        System.Windows.Documents.TextElement.SetFontFamily(surface, window.FontFamily);
-        System.Windows.Documents.TextElement.SetFontSize(surface, window.FontSize);
-        System.Windows.Documents.TextElement.SetForeground(surface, window.Foreground);
-        System.Windows.Documents.TextElement.SetFontWeight(surface, window.FontWeight);
-        System.Windows.Documents.TextElement.SetFontStyle(surface, window.FontStyle);
-        System.Windows.Documents.TextElement.SetFontStretch(surface, window.FontStretch);
-        if (window is MainWindow) surface.Height = maximumHeight;
-        surface.ApplyTemplate();
-        surface.Measure(new Size(width, maximumHeight));
-        var height = Math.Max(1, Math.Min(maximumHeight, (int)Math.Ceiling(surface.DesiredSize.Height)));
-        surface.Height = height;
-        surface.Measure(new Size(width, height));
-        surface.Arrange(new Rect(0, 0, width, height));
-        surface.UpdateLayout();
-        var image = new System.Windows.Media.Imaging.RenderTargetBitmap(width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
-        image.Render(surface);
-        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
-        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
-        using var output = File.Create(file);
-        encoder.Save(output);
+        try
+        {
+            System.Windows.Documents.TextElement.SetFontFamily(surface, window.FontFamily);
+            System.Windows.Documents.TextElement.SetFontSize(surface, window.FontSize);
+            System.Windows.Documents.TextElement.SetForeground(surface, window.Foreground);
+            System.Windows.Documents.TextElement.SetFontWeight(surface, window.FontWeight);
+            System.Windows.Documents.TextElement.SetFontStyle(surface, window.FontStyle);
+            System.Windows.Documents.TextElement.SetFontStretch(surface, window.FontStretch);
+            if (window is MainWindow) surface.Height = maximumHeight;
+            surface.ApplyTemplate();
+            surface.Measure(new Size(width, maximumHeight));
+            var height = Math.Max(1, Math.Min(maximumHeight, (int)Math.Ceiling(surface.DesiredSize.Height)));
+            surface.Height = height;
+            surface.Measure(new Size(width, height));
+            surface.Arrange(new Rect(0, 0, width, height));
+            surface.UpdateLayout();
+            var image = new System.Windows.Media.Imaging.RenderTargetBitmap(width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+            image.Render(surface);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
+            using var output = File.Create(file);
+            encoder.Save(output);
+        }
+        finally
+        {
+            surface.Child = null;
+            window.Content = content;
+        }
     }
 
     private static void TestNativeHelpers()

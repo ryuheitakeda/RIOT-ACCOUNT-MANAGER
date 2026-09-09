@@ -39,10 +39,27 @@ public sealed record Performance(string Name, int Games, int Wins, double Kda, d
     public double WinRate => Games == 0 ? 0 : Wins * 100.0 / Games;
     public string Display => $"{Name}    {Games}戦  {WinRate:F0}%    KDA {Kda:F2}    CS/分 {CsPerMinute:F1}";
 }
+public sealed record QueueDefinition(string Key, string Name, IReadOnlyList<int> QueueIds, bool IsRanked);
 public static class Queues
 {
     public const string Solo = "RANKED_SOLO_5x5";
     public const string Flex = "RANKED_FLEX_SR";
+    public const string Normal = "NORMAL";
+    public static readonly IReadOnlyList<QueueDefinition> Definitions = Array.AsReadOnly(new[]
+    {
+        new QueueDefinition(Solo, "Solo / Duo", Array.AsReadOnly(new[] { 420 }), true),
+        new QueueDefinition(Flex, "Flex", Array.AsReadOnly(new[] { 440 }), true),
+        new QueueDefinition(Normal, "ノーマル", Array.AsReadOnly(new[] { 400, 430, 480, 490 }), false)
+    });
+    public static QueueDefinition Get(string queue) => Definitions.SingleOrDefault(q => q.Key == queue)
+        ?? throw new ArgumentException("非対応のキューです。", nameof(queue));
+    public static bool Includes(string queue, int queueId) => Get(queue).QueueIds.Contains(queueId);
+    public static bool IsRanked(string queue) => Get(queue).IsRanked;
+    public static string MatchName(int queueId) => queueId switch
+    {
+        400 => "ドラフト", 430 => "ブラインド", 480 => "スイフトプレイ", 490 => "クイックプレイ",
+        420 => "Solo / Duo", 440 => "Flex", _ => $"キュー {queueId}"
+    };
     public static int Id(string queue) => queue switch { Solo => 420, Flex => 440, _ => throw new ArgumentException("非対応のキューです。") };
 }
 public static class Regions

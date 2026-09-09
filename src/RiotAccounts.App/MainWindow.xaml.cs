@@ -20,12 +20,12 @@ public partial class MainWindow:Window
     private CancellationTokenSource? operation;
     private bool initialized;
     private RiotAccount? Selected=>(AccountsList.SelectedItem as AccountItem)?.Account;
-    private string Queue=>QueuePicker.SelectedIndex==1?Queues.Flex:Queues.Solo;
+    private string Queue=>QueuePicker.SelectedValue as string??Queues.Solo;
     public MainWindow(Store store,string folder)
     {
         this.store=store;this.folder=folder;
         api=new(http,()=>store.GetSecret("riot-api-key"));provider=new(store,api);login=new(store);
-        InitializeComponent();initialized=true;Reload();
+        InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
         Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();http.Dispose();};
     }
@@ -40,7 +40,14 @@ public partial class MainWindow:Window
         if(!initialized)return;
         var a=Selected;EmptyPanel.Visibility=a==null?Visibility.Visible:Visibility.Collapsed;DetailPanel.Visibility=a==null?Visibility.Collapsed:Visibility.Visible;if(a==null)return;
         AccountTitle.Text=a.Label;AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}";
+        var ranked=Queues.Get(Queue).IsRanked;
+        if(!ranked&&HistoryTab.IsSelected)DetailTabs.SelectedItem=OverviewTab;
+        RankedSummaryPanel.Visibility=ForecastPanel.Visibility=HistoryTab.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
+        NormalModeText.Visibility=ranked?Visibility.Collapsed:Visibility.Visible;
+        RefreshAnalysisButton.Content=ranked?"戦績・分析更新":"戦績更新";
         var cache=store.Cache(a.Id);var latest=cache.Ranks.LastOrDefault();var rank=latest?.Entries.FirstOrDefault(e=>e.QueueType==Queue);
+        if(ranked)
+        {
         RankTitle.Text=latest==null?"ランク情報を取得してください":rank?.Display??"UNRANKED";
         RankRecord.Text=rank?.Record??(latest==null?"「全ランク更新」または「戦績・分析更新」で取得します。":"このキューのランク情報はありません。");
         RankTime.Text=latest==null?"未取得":$"観測日時 {latest.ObservedAt.LocalDateTime:yyyy/MM/dd HH:mm}";
@@ -49,14 +56,20 @@ public partial class MainWindow:Window
         ForecastDetails.Text=forecast==null?"「戦績・分析更新」で相手ランクを取得します。直近30日の10戦以上が必要です。":$"{forecast.Explanation}\n{forecast.MatchCount}戦 / 相手 {forecast.KnownPlayers}/{forecast.TotalPlayers}件 / 欠測率 {(forecast.TotalPlayers==0?100:100.0*(forecast.TotalPlayers-forecast.KnownPlayers)/forecast.TotalPlayers):F1}%\n取得 {forecast.CreatedAt.LocalDateTime:yyyy/MM/dd HH:mm}"+(forecast.Median==null?"":$"\n中央値 {forecast.Median}");
         if(forecast?.OldestRankObservedAt is{} oldest&&forecast.LatestRankObservedAt is{} newest)
             ForecastDetails.Text+=$"\n相手ランク観測 {oldest.LocalDateTime:MM/dd HH:mm} 〜 {newest.LocalDateTime:MM/dd HH:mm}";
+        }
+        else
+        {
+            RankTitle.Text=RankRecord.Text=RankTime.Text=ForecastRange.Text=ForecastDetails.Text="";
+            HistoryList.ItemsSource=Array.Empty<string>();HistoryPlot.Plot.Clear();HistoryPlot.Refresh();
+        }
         var recent=Analytics.Recent(cache,a.Lol.Puuid??"",Queue,CountPicker.SelectedIndex==1?50:20);
         var summary=Analytics.Summarize(recent,a.Lol.Puuid??"",_=>"全体").FirstOrDefault();
         PerformanceText.Text=summary==null?"まだ戦績がありません。":$"{summary.Games}戦  {summary.Wins}勝 {summary.Games-summary.Wins}敗  /  勝率 {summary.WinRate:F1}%\nKDA {summary.Kda:F2}    CS/分 {summary.CsPerMinute:F1}    平均視界スコア {summary.VisionPerGame:F1}";
         UpdatedText.Text=cache.QueueUpdatedAt.TryGetValue(Queue,out var updated)?$"戦績取得 {updated.LocalDateTime:yyyy/MM/dd HH:mm}  /  リメイクは集計対象外":"このキューの戦績は未取得です。";
-        MatchesGrid.ItemsSource=recent.Select(m=>{var p=m.Participants.Single(p=>p.Puuid==a.Lol.Puuid);return new{When=m.StartedAt.LocalDateTime.ToString("MM/dd HH:mm"),Result=p.Win?"勝利":"敗北",Champion=p.Champion,Kda=$"{p.Kills} / {p.Deaths} / {p.Assists}",Cs=(p.Cs/(m.DurationSeconds/60.0)).ToString("F1")};}).ToList();
+        MatchesGrid.ItemsSource=recent.Select(m=>{var p=m.Participants.Single(p=>p.Puuid==a.Lol.Puuid);return new{When=m.StartedAt.LocalDateTime.ToString("MM/dd HH:mm"),Mode=Queues.MatchName(m.QueueId),Result=p.Win?"勝利":"敗北",Champion=p.Champion,Kda=$"{p.Kills} / {p.Deaths} / {p.Assists}",Cs=(p.Cs/(m.DurationSeconds/60.0)).ToString("F1")};}).ToList();
         ChampionStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>p.Champion);
         RoleStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>string.IsNullOrEmpty(p.Role)?"不明":p.Role);
-        DrawHistory(cache);
+        if(ranked)DrawHistory(cache);
     }
     private void DrawHistory(AccountCache cache)
     {

@@ -2,9 +2,13 @@ namespace RiotAccounts.Core;
 
 public static class Analytics
 {
-    public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count) => cache.Matches
-        .Where(m => m.QueueId == Queues.Id(queue) && !m.Remake && m.DurationSeconds > 0 && m.Participants.Any(p => p.Puuid == puuid))
-        .DistinctBy(m => m.Id).OrderByDescending(m => m.StartedAt).Take(count).ToList();
+    public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count)
+    {
+        var definition = Queues.Get(queue);
+        return cache.Matches
+            .Where(m => definition.QueueIds.Contains(m.QueueId) && !m.Remake && m.DurationSeconds > 0 && m.Participants.Count(p => p.Puuid == puuid) == 1)
+            .DistinctBy(m => m.Id).OrderByDescending(m => m.StartedAt).Take(count).ToList();
+    }
 
     public static List<Performance> Summarize(IEnumerable<MatchRecord> matches, string puuid, Func<Participant, string> group)
     {
@@ -20,6 +24,7 @@ public static class Analytics
 
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
     {
+        if (!Queues.IsRanked(queue)) throw new ArgumentException("参考ランク帯はランク戦のみ対応しています。", nameof(queue));
         var matches = Recent(cache, puuid, queue, int.MaxValue)
             .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(20).ToList();
         var observations = cache.Opponents.Where(o => o.QueueType == queue && o.ObservedAt <= now && o.ObservedAt >= now.AddHours(-24))
