@@ -17,6 +17,7 @@ public sealed class Store
     private readonly string connectionString;
     private readonly ISecretProtector protector;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private const string AccountOrderKey = "accountOrder";
     public Store(string file, ISecretProtector protector)
     {
         this.protector = protector;
@@ -43,7 +44,13 @@ public sealed class Store
 
     public List<RiotAccount> Accounts()
     {
-        using var c = Open(); using var cmd = c.CreateCommand();
+        using var c = Open();
+        return ReadAccounts(c, null);
+    }
+
+    private static List<RiotAccount> ReadAccounts(SqliteConnection c, SqliteTransaction? tx)
+    {
+        using var cmd = c.CreateCommand(); cmd.Transaction = tx;
         cmd.CommandText = "SELECT json FROM documents WHERE kind='account'";
         using var r = cmd.ExecuteReader(); var result = new List<RiotAccount>();
         while (r.Read()) result.Add(JsonSerializer.Deserialize<RiotAccount>(r.GetString(0), Json)!);
@@ -58,7 +65,55 @@ public sealed class Store
             // Older files embedded profiles in the account document. Read them until the next save migrates it.
             if (values.Count > 0) { account.Profiles.Clear(); account.Profiles.AddRange(values); }
         }
-        return result.OrderBy(a => a.Label, StringComparer.CurrentCultureIgnoreCase).ToList();
+        var alphabetical = result.OrderBy(a => a.Label, StringComparer.CurrentCultureIgnoreCase).ToList();
+        var order = ReadAccountOrder(c, tx);
+        if (order == null) return alphabetical;
+        var positions = order.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index);
+        // IDs absent from an older order are appended; labels only break ties for these new accounts.
+        return alphabetical.OrderBy(a => positions.GetValueOrDefault(a.Id, int.MaxValue)).ToList();
+    }
+
+    private static List<Guid>? ReadAccountOrder(SqliteConnection c, SqliteTransaction? tx)
+    {
+        using var cmd = c.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "SELECT json FROM documents WHERE kind='setting' AND id=$id";
+        cmd.Parameters.AddWithValue("$id", AccountOrderKey);
+        if (cmd.ExecuteScalar() is not string json) return null;
+        List<Guid>? order;
+        try { order = JsonSerializer.Deserialize<List<Guid>>(json, Json); }
+        catch (JsonException error) { throw new InvalidOperationException("保存されたアカウントの並び順が不正です。", error); }
+        if (order == null || order.Contains(Guid.Empty) || order.Distinct().Count() != order.Count)
+            throw new InvalidOperationException("保存されたアカウントの並び順が不正です。");
+        return order;
+    }
+
+    public void SaveAccountOrder(IReadOnlyList<Guid> accountIds)
+    {
+        ArgumentNullException.ThrowIfNull(accountIds);
+        var order = accountIds.ToList();
+        using var c = Open(); using var tx = c.BeginTransaction();
+        var existing = ReadAccounts(c, tx).Select(a => a.Id).ToHashSet();
+        if (order.Contains(Guid.Empty) || order.Distinct().Count() != order.Count || order.Count != existing.Count || !existing.SetEquals(order))
+            throw new ArgumentException("並び順には登録済みの全アカウントを重複なく指定してください。", nameof(accountIds));
+        WriteDocument(c, tx, "setting", AccountOrderKey, order);
+        tx.Commit();
+    }
+
+    public void MoveAccount(Guid accountId, Guid relativeToId, bool after)
+    {
+        using var c = Open(); using var tx = c.BeginTransaction();
+        var original = ReadAccounts(c, tx).Select(a => a.Id).ToList();
+        if (accountId == Guid.Empty || !original.Contains(accountId))
+            throw new ArgumentException("移動するアカウントが見つかりません。", nameof(accountId));
+        if (relativeToId == Guid.Empty || !original.Contains(relativeToId))
+            throw new ArgumentException("移動先のアカウントが見つかりません。", nameof(relativeToId));
+        if (accountId == relativeToId) return;
+        var order = original.ToList();
+        order.Remove(accountId);
+        order.Insert(order.IndexOf(relativeToId) + (after ? 1 : 0), accountId);
+        if (order.SequenceEqual(original)) return;
+        WriteDocument(c, tx, "setting", AccountOrderKey, order);
+        tx.Commit();
     }
 
     public T? Read<T>(string kind, string id)
@@ -162,6 +217,12 @@ public sealed class Store
         }
         if (cipher != null) Execute(c, tx, "INSERT INTO secrets VALUES($id,$cipher) ON CONFLICT(id) DO UPDATE SET cipher=excluded.cipher",
             ("$id", key), ("$cipher", cipher));
+        var order = ReadAccountOrder(c, tx);
+        if (order != null && !order.Contains(account.Id))
+        {
+            order.Add(account.Id);
+            WriteDocument(c, tx, "setting", AccountOrderKey, order);
+        }
         tx.Commit();
     }
 
@@ -185,6 +246,8 @@ public sealed class Store
     {
         using var c = Open(); using var tx = c.BeginTransaction();
         Execute(c, tx, "DELETE FROM documents WHERE id=$id; DELETE FROM secrets WHERE id=$id; DELETE FROM game_profiles WHERE account_id=$id; DELETE FROM game_records WHERE account_id=$id;", ("$id", id.ToString()));
+        var order = ReadAccountOrder(c, tx);
+        if (order != null && order.Remove(id)) WriteDocument(c, tx, "setting", AccountOrderKey, order);
         tx.Commit();
     }
 }

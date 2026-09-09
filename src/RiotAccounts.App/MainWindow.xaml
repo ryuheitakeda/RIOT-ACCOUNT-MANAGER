@@ -11,11 +11,20 @@
    <Border Background="White" CornerRadius="10" Padding="16">
     <DockPanel>
      <Button DockPanel.Dock="Bottom" Content="＋ アカウントを追加" Click="Add_Click" Margin="0,16,0,0"/>
-     <StackPanel DockPanel.Dock="Top"><TextBlock Text="アカウント" FontSize="18" FontWeight="SemiBold"/><TextBox x:Name="Search" TextChanged="Search_Changed" ToolTip="管理名・Riot IDで検索" AutomationProperties.Name="アカウントを検索" Margin="0,14,0,10"/></StackPanel>
-     <ListBox x:Name="AccountsList" SelectionChanged="Account_Changed" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-      <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="10,14"/><Setter Property="Margin" Value="0,2"/></Style></ListBox.ItemContainerStyle>
-      <ListBox.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding Label}" FontSize="16" FontWeight="SemiBold"/><TextBlock Text="{Binding RiotId}" Foreground="#597183" Margin="0,5,0,0"/><TextBlock Text="{Binding Platform}" Foreground="#597183" FontSize="12" Margin="0,3,0,0"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
-     </ListBox>
+     <StackPanel DockPanel.Dock="Top"><TextBlock Text="アカウント" FontSize="18" FontWeight="SemiBold"/><TextBox x:Name="Search" TextChanged="Search_Changed" ToolTip="管理名・Riot IDで検索" AutomationProperties.Name="アカウントを検索" Margin="0,14,0,8"/><TextBlock x:Name="AccountReorderHint" Foreground="#597183" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/></StackPanel>
+     <Grid>
+      <ListBox x:Name="AccountsList" SelectionChanged="Account_Changed" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled" KeyboardNavigation.TabNavigation="Continue" AllowDrop="True" PreviewDragOver="Accounts_DragOver" PreviewDragLeave="Accounts_DragLeave" PreviewDrop="Accounts_Drop">
+       <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="8,12"/><Setter Property="Margin" Value="0,2"/></Style></ListBox.ItemContainerStyle>
+       <ListBox.ItemTemplate><DataTemplate><Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Button x:Name="ReorderHandle" Width="24" Height="32" Margin="0,0,8,0" Padding="4" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" Cursor="SizeNS" IsEnabled="{Binding Tag, RelativeSource={RelativeSource AncestorType=ListBox}}" AutomationProperties.Name="{Binding Label, StringFormat={}{0} の順番を変更}" AutomationProperties.HelpText="ドラッグ、または Alt と上下矢印キーで移動" ToolTip="ドラッグで並べ替え / Alt＋↑・↓" PreviewMouseLeftButtonDown="ReorderHandle_Down" PreviewMouseMove="ReorderHandle_Move" PreviewMouseLeftButtonUp="ReorderHandle_Up" LostMouseCapture="ReorderHandle_LostCapture" PreviewKeyDown="ReorderHandle_KeyDown" QueryContinueDrag="ReorderHandle_QueryContinueDrag">
+         <StackPanel Width="14" IsHitTestVisible="False"><Border Background="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Height="2" Margin="0,0,0,3"/><Border Background="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Height="2" Margin="0,0,0,3"/><Border Background="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Height="2"/></StackPanel>
+        </Button>
+        <StackPanel Grid.Column="1"><TextBlock Text="{Binding Label}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding RiotId}" Foreground="#597183" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Platform}" Foreground="#597183" FontSize="12" Margin="0,3,0,0"/></StackPanel>
+       </Grid></DataTemplate></ListBox.ItemTemplate>
+      </ListBox>
+      <Canvas IsHitTestVisible="False" ClipToBounds="True"><Border x:Name="AccountDropIndicator" Height="3" Width="{Binding ActualWidth, ElementName=AccountsList}" Background="#24749B" CornerRadius="1.5" Visibility="Collapsed"/></Canvas>
+     </Grid>
     </DockPanel>
    </Border>
    <Grid Grid.Column="2">

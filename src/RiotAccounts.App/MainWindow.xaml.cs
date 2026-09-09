@@ -33,7 +33,7 @@ public partial class MainWindow:Window
     {
         var selectedId=select??Selected?.Id;var search=Search.Text.Trim();
         var list=store.Accounts().Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)).Select(a=>new AccountItem(a)).ToList();
-        AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();
+        AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();UpdateAccountReorderingAvailability();
     }
     private void Render()
     {
@@ -95,7 +95,7 @@ public partial class MainWindow:Window
     private async Task Run(Func<IProgress<string>,CancellationToken,Task> action)
     {
         if(operation!=null){StatusText.Text="処理中です。終了するか「中止」を押してください。";return;}
-        operation=new();CancelButton.Visibility=Visibility.Visible;
+        operation=new();UpdateAccountReorderingAvailability();CancelButton.Visibility=Visibility.Visible;
         try{await action(new Progress<string>(message=>StatusText.Text=message),operation.Token);}
         catch(OperationCanceledException){StatusText.Text=operation.IsCancellationRequested?"処理を中止しました。取得済みのデータは保存されています。":"処理が中止またはタイムアウトしました。保存済みデータは保持しています。";}
         catch(HttpRequestException){StatusText.Text="通信できません。接続を確認してください。保存済みデータは保持しています。";}

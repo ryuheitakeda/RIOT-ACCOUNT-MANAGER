@@ -22,6 +22,7 @@ internal static class SmokeTests
             Check(report, "SQLite persist/reopen/edit/delete and encrypted database/WAL", () => TestStore(directory));
             Check(report, "WPF main window and account/settings dialogs construct with dummy data", () => TestWindows(directory, artifactDirectory));
             Check(report, "WPF normal match history/statistics and ranked/normal tab switching", () => TestNormalWindows(directory, artifactDirectory));
+            Check(report, "WPF account reordering, selection retention, search/busy guards and drop geometry", () => TestAccountReordering(directory, artifactDirectory));
             Check(report, "Windows INPUT ABI and synthetic calibration image comparison", TestNativeHelpers);
             Check(report, "Calibration rejects size/DPI/version/legacy/bounds changes", TestCalibrationGeometry);
         }
@@ -294,6 +295,133 @@ internal static class SmokeTests
 
         static string Cell(object row, string property) => row.GetType().GetProperty(property)?.GetValue(row) as string
             ?? throw new InvalidOperationException("Missing self-test row field: " + property);
+    }
+
+    private static void TestAccountReordering(string directory, string? artifactDirectory)
+    {
+        var application = System.Windows.Application.Current;
+        var shutdownMode = application.ShutdownMode;
+        application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        MainWindow? window = null;
+        try
+        {
+            var database = Path.Combine(directory, "reorder-ui.db");
+            var store = new Store(database, new WindowsProtector());
+            var accounts = new[] { "01 メイン", "02 サブ", "03 ランク練習", "04 フレンド用" }.Select((label, index) =>
+                new RiotAccount(Guid.NewGuid(), label, [new("lol", "Dummy " + (index + 1), "JP1", "JP1")])).ToArray();
+            foreach (var account in accounts) store.Save(account, new Credentials("dummy-reorder-user", "dummy-reorder-password"));
+            var ids = accounts.Select(account => account.Id).ToArray();
+            window = new MainWindow(store, directory);
+            var list = (ListBox)window.FindName("AccountsList");
+            var search = (TextBox)window.FindName("Search");
+            var hint = (TextBlock)window.FindName("AccountReorderHint");
+            Require(window.IsAccountReorderingEnabled && list.Tag is true);
+            list.SelectedItem = list.Items.Cast<AccountItem>().Single(item => item.Account.Id == ids[2]);
+            Require(window.MoveAccountInList(ids[3], ids[0], false));
+            Order(ids[3], ids[0], ids[1], ids[2]);
+            Require(window.MoveAccountInList(ids[3], ids[2], true));
+            Order(ids);
+            Require(window.MoveAccountInList(ids[1], ids[2], true));
+            Order(ids[0], ids[2], ids[1], ids[3]);
+            Require(!window.MoveAccountInList(ids[2], ids[2], true));
+            Require(window.MoveAccountByKeyboard(ids[3], -1));
+            Order(ids[0], ids[2], ids[3], ids[1]);
+            Require(window.MoveAccountByKeyboard(ids[3], 1));
+            Order(ids[0], ids[2], ids[1], ids[3]);
+            Require(!window.MoveAccountByKeyboard(ids[0], -1));
+            Require(!window.MoveAccountByKeyboard(ids[3], 1));
+
+            search.Text = "01 メイン";
+            Require(!window.IsAccountReorderingEnabled && list.Tag is false && hint.Text.Contains("検索", StringComparison.Ordinal));
+            Require(!window.MoveAccountInList(ids[3], ids[0], false));
+            Require(!window.MoveAccountByKeyboard(ids[0], 1));
+            search.Text = "";
+            Require(window.IsAccountReorderingEnabled);
+            // Search chooses its visible result; moves must retain that selection as well.
+            var selected = ((AccountItem)list.SelectedItem).Account.Id;
+            var order = new[] { ids[0], ids[2], ids[1], ids[3] };
+            Require(list.Items.Cast<AccountItem>().Select(item => item.Account.Id).SequenceEqual(order));
+            var run = typeof(MainWindow).GetMethod("Run", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Missing operation helper");
+            var verifiedBusy = false;
+            Func<IProgress<string>, CancellationToken, Task> whileBusy = (_, _) =>
+            {
+                Require(!window.IsAccountReorderingEnabled && list.Tag is false && hint.Text.Contains("処理中", StringComparison.Ordinal));
+                Require(!window.MoveAccountInList(ids[3], ids[0], false));
+                Require(!window.MoveAccountByKeyboard(ids[0], 1));
+                verifiedBusy = true;
+                return Task.CompletedTask;
+            };
+            ((Task)run.Invoke(window, [whileBusy])!).GetAwaiter().GetResult();
+            Require(verifiedBusy); // Run handles UI exceptions; an assertion there must still fail this test.
+            Require(window.IsAccountReorderingEnabled);
+            Require(((AccountItem)list.SelectedItem).Account.Id == selected);
+            Require(new Store(database, new WindowsProtector()).Accounts().Select(account => account.Id).SequenceEqual(order));
+
+            Require(!MainWindow.IsAccountDragThresholdReached(new Point(10, 10), new Point(10, 10)));
+            Require(MainWindow.IsAccountDragThresholdReached(new Point(), new Point(SystemParameters.MinimumHorizontalDragDistance, 0)));
+            Require(MainWindow.IsAccountDragThresholdReached(new Point(), new Point(0, SystemParameters.MinimumVerticalDragDistance)));
+            Require(MainWindow.AccountReorderKeyDirection(System.Windows.Input.Key.Up, System.Windows.Input.ModifierKeys.Alt) == -1);
+            Require(MainWindow.AccountReorderKeyDirection(System.Windows.Input.Key.Down, System.Windows.Input.ModifierKeys.Alt) == 1);
+            Require(MainWindow.AccountReorderKeyDirection(System.Windows.Input.Key.Up, System.Windows.Input.ModifierKeys.None) == 0);
+
+            // Lay out the real list in an isolated visual tree, without showing a native window or sending input.
+            var content = (FrameworkElement)window.Content;
+            window.Content = null;
+            var surface = new Border { Child = content, Width = 1220, Height = 850 };
+            try
+            {
+                surface.Measure(new Size(1220, 850));
+                surface.Arrange(new Rect(0, 0, 1220, 850));
+                surface.UpdateLayout();
+                Require(list.ActualHeight > 0);
+                Require(window.TryGetAccountDropTarget(new Point(5, 0), out var first) && first.AccountId == order[0] && !first.After);
+                Require(window.TryGetAccountDropTarget(new Point(5, list.ActualHeight - 1), out var last) && last.AccountId == order[^1] && last.After);
+                var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(1);
+                var handle = FindVisual<Button>(row) ?? throw new InvalidOperationException("Missing reorder handle");
+                var bars = handle.Content as StackPanel ?? throw new InvalidOperationException("Missing reorder handle lines");
+                Require(handle.ActualWidth > 0 && bars.ActualWidth >= 12 && bars.Children.Count == 3);
+                Require(bars.Children.Cast<Border>().All(line => line.ActualWidth >= 12 && line.ActualHeight > 0));
+                var rowTop = row.TranslatePoint(new Point(), list).Y;
+                Require(window.TryGetAccountDropTarget(new Point(5, rowTop + 1), out var above) && above.AccountId == order[1] && !above.After);
+                Require(window.TryGetAccountDropTarget(new Point(5, rowTop + row.ActualHeight - 1), out var below) && below.AccountId == order[1] && below.After);
+                Require(!window.TryGetAccountDropTarget(new Point(-1, 5), out _));
+                Require(!window.TryGetAccountDropTarget(new Point(5, -1), out _));
+                Require(!window.TryGetAccountDropTarget(new Point(list.ActualWidth + 1, 5), out _));
+                Require(!window.TryGetAccountDropTarget(new Point(5, list.ActualHeight + 1), out _));
+                Require(store.Accounts().Select(account => account.Id).SequenceEqual(order));
+            }
+            finally { surface.Child = null; window.Content = content; }
+            if (artifactDirectory != null)
+            {
+                Directory.CreateDirectory(artifactDirectory);
+                Render(window, Path.Combine(artifactDirectory, "self-test-reorder.png"));
+            }
+
+            void Order(params Guid[] expected)
+            {
+                Require(list.Items.Cast<AccountItem>().Select(item => item.Account.Id).SequenceEqual(expected));
+                Require(store.Accounts().Select(account => account.Id).SequenceEqual(expected));
+                Require(((AccountItem)list.SelectedItem).Account.Id == ids[2]);
+                Require(((TextBlock)window.FindName("AccountTitle")).Text == accounts[2].Label);
+            }
+
+            static T? FindVisual<T>(DependencyObject parent) where T : DependencyObject
+            {
+                for (var index = 0; index < System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent); index++)
+                {
+                    var child = System.Windows.Media.VisualTreeHelper.GetChild(parent, index);
+                    if (child is T match) return match;
+                    if (FindVisual<T>(child) is { } nested) return nested;
+                }
+                return null;
+            }
+        }
+        finally
+        {
+            window?.Close();
+            application.ShutdownMode = shutdownMode;
+        }
     }
 
     private static void Render(Window window, string file)
