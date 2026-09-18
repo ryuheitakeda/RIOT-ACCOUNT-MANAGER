@@ -96,7 +96,8 @@ public partial class MainWindow:Window
     {
         if(operation!=null){StatusText.Text="処理中です。終了するか「中止」を押してください。";return;}
         operation=new();UpdateAccountReorderingAvailability();CancelButton.Visibility=Visibility.Visible;
-        try{await action(new Progress<string>(message=>StatusText.Text=message),operation.Token);}
+        var status=new StatusProgress(StatusText);
+        try{await action(status,operation.Token);}
         catch(OperationCanceledException){StatusText.Text=operation.IsCancellationRequested?"処理を中止しました。取得済みのデータは保存されています。":"処理が中止またはタイムアウトしました。保存済みデータは保持しています。";}
         catch(HttpRequestException){StatusText.Text="通信できません。接続を確認してください。保存済みデータは保持しています。";}
         catch(CryptographicException){StatusText.Text="ログイン情報を復号できません。登録したWindowsユーザーで起動してください。";}
@@ -104,7 +105,18 @@ public partial class MainWindow:Window
         catch(System.Text.Json.JsonException){StatusText.Text="受信データまたは設定ファイルを読み取れません。設定を確認して再試行してください。";}
         catch(Exception ex) when(ex is RiotApiException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception or System.Windows.Automation.ElementNotAvailableException or ExternalException)
         {StatusText.Text=ex is RiotApiException or InvalidOperationException?ex.Message:"操作に失敗しました。入力内容・Windows権限を確認してください。";}
-        finally{operation.Dispose();operation=null;CancelButton.Visibility=Visibility.Collapsed;Reload();}
+        finally{status.Active=false;operation.Dispose();operation=null;CancelButton.Visibility=Visibility.Collapsed;Reload();}
+    }
+    // Progress<T> posts asynchronously, so a report queued just before a synchronous failure
+    // would overwrite the error message. Apply UI-thread reports immediately and drop late ones.
+    private sealed class StatusProgress(TextBlock target):IProgress<string>
+    {
+        public bool Active{get;set;}=true;
+        public void Report(string message)
+        {
+            if(target.Dispatcher.CheckAccess()){if(Active)target.Text=message;}
+            else target.Dispatcher.BeginInvoke(()=>{if(Active)target.Text=message;});
+        }
     }
     private void Search_Changed(object sender,TextChangedEventArgs e){if(initialized)Reload();}
     private void Account_Changed(object sender,SelectionChangedEventArgs e)=>Render();
