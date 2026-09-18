@@ -296,6 +296,60 @@ public async Task ResolveIdentity()
     var saved = fixture.Store.Accounts().Single(); Equal(2, saved.Profiles.Count); Equal("resolved", saved.Lol.Puuid); Equal(1, fixture.Store.Cache(account.Id).Ranks.Count);
 }
 [Fact]
+public async Task StalePuuidRenewed()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    var cache = Sample(); cache.Ranks.Add(new(Now(), [Rank()])); cache.QueueUpdatedAt[Queues.Solo] = Now(); fixture.Store.SaveCache(account.Id, cache);
+    using var handler = new Handler((request, _) =>
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        if (path.EndsWith("/by-puuid/self")) return Task.FromResult(Response(HttpStatusCode.BadRequest));
+        if (path.StartsWith("/riot/account")) return Task.FromResult(Response(HttpStatusCode.OK, new { puuid = "renewed", gameName = "Riot Name", tagLine = "JP1" }));
+        if (path.EndsWith("/by-puuid/renewed")) return Task.FromResult(Response(HttpStatusCode.OK, new[] { Rank() }));
+        return Task.FromResult(Response(HttpStatusCode.NotFound));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    await new LolStatsProvider(fixture.Store, api).RefreshRanksAsync(account, default);
+    Equal("renewed", fixture.Store.Accounts().Single().Lol.Puuid);
+    var saved = fixture.Store.Cache(account.Id);
+    Equal(2, saved.Ranks.Count); Equal(0, saved.Matches.Count); Equal(0, saved.Opponents.Count); Equal(0, saved.QueueUpdatedAt.Count);
+}
+[Fact]
+public async Task BadRequestWithCurrentPuuid()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    fixture.Store.SaveCache(account.Id, Sample());
+    var calls = 0;
+    using var handler = new Handler((request, _) =>
+    {
+        calls++;
+        if (request.RequestUri!.AbsolutePath.StartsWith("/riot/account")) return Task.FromResult(Response(HttpStatusCode.OK, new { puuid = "self", gameName = "Riot Name", tagLine = "JP1" }));
+        return Task.FromResult(Response(HttpStatusCode.BadRequest));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    var error = await Throws<RiotApiException>(() => new LolStatsProvider(fixture.Store, api).RefreshRanksAsync(account, default));
+    Equal(HttpStatusCode.BadRequest, error.StatusCode); Equal(2, calls);
+    Equal("self", fixture.Store.Accounts().Single().Lol.Puuid); Equal(10, fixture.Store.Cache(account.Id).Matches.Count);
+}
+[Fact]
+public async Task StalePuuidRenewedForNormalMatches()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    fixture.Store.SaveCache(account.Id, Sample());
+    using var handler = new Handler((request, _) =>
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        if (path.Contains("/by-puuid/self/")) return Task.FromResult(Response(HttpStatusCode.BadRequest));
+        if (path.StartsWith("/riot/account")) return Task.FromResult(Response(HttpStatusCode.OK, new { puuid = "renewed", gameName = "Riot Name", tagLine = "JP1" }));
+        if (path.Contains("/by-puuid/renewed/")) return Task.FromResult(Response(HttpStatusCode.OK, Array.Empty<string>()));
+        return Task.FromResult(Response(HttpStatusCode.NotFound));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    await new LolStatsProvider(fixture.Store, api).RefreshAnalysisAsync(account, Queues.Normal, 20, new InlineProgress(_ => { }), default);
+    Equal("renewed", fixture.Store.Accounts().Single().Lol.Puuid);
+    var saved = fixture.Store.Cache(account.Id); Equal(0, saved.Matches.Count); True(saved.QueueUpdatedAt.ContainsKey(Queues.Normal));
+}
+[Fact]
 public async Task MissingOpponentApi()
 {
     using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);

@@ -99,10 +99,34 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         return updated;
     }
 
+    // Encrypted PUUIDs are issued per API key application, so a saved PUUID gets HTTP 400 after
+    // switching to a key from another application. Resolve the Riot ID again; if the PUUID changed,
+    // drop matches and opponents keyed by the old encryption but keep rank observations.
+    private async Task<RiotAccount?> Reresolve(RiotAccount account, CancellationToken ct, IProgress<string>? progress)
+    {
+        var old = account.Lol.Puuid;
+        if (string.IsNullOrEmpty(old)) return null;
+        var forgotten = account with { Profiles = account.Profiles.Select(p => p.Game == "lol" ? p with { Puuid = null } : p).ToList() };
+        store.Save(forgotten);
+        var renewed = await Resolve(forgotten, ct, progress);
+        if (renewed.Lol.Puuid == old) return null;
+        var cache = store.Cache(account.Id);
+        cache.Matches.Clear(); cache.Opponents.Clear(); cache.QueueUpdatedAt.Clear(); cache.MatchesUpdatedAt = null;
+        store.SaveCache(account.Id, cache);
+        return renewed;
+    }
+
     public async Task RefreshRanksAsync(RiotAccount account, CancellationToken cancellationToken, IProgress<string>? progress = null)
     {
         account = await Resolve(account, cancellationToken, progress);
-        var ranks = await Ranks(account.Lol.Platform, account.Lol.Puuid!, cancellationToken, progress);
+        List<RankEntry> ranks;
+        try { ranks = await Ranks(account.Lol.Platform, account.Lol.Puuid!, cancellationToken, progress); }
+        catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.BadRequest)
+        {
+            if (await Reresolve(account, cancellationToken, progress) is not { } renewed) throw;
+            account = renewed;
+            ranks = await Ranks(account.Lol.Platform, account.Lol.Puuid!, cancellationToken, progress);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         var cache = store.Cache(account.Id);
         cache.Ranks.Add(new(DateTimeOffset.UtcNow, ranks));
@@ -129,7 +153,14 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         else account = await Resolve(account, cancellationToken, progress);
         var cache = store.Cache(account.Id);
         var profile = account.Lol;
-        var fetched = await RefreshMatches(account, definition, count, cache, progress, cancellationToken);
+        int fetched;
+        try { fetched = await RefreshMatches(account, definition, count, cache, progress, cancellationToken); }
+        catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.BadRequest)
+        {
+            if (await Reresolve(account, cancellationToken, progress) is not { } renewed) throw;
+            account = renewed; cache = store.Cache(account.Id); profile = account.Lol;
+            fetched = await RefreshMatches(account, definition, count, cache, progress, cancellationToken);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         var now = DateTimeOffset.UtcNow;
         cache.MatchesUpdatedAt = now;
