@@ -102,6 +102,11 @@ public sealed class SettingsDialog : Window
         form.Children.Add(portal);
         var clearKey = new CheckBox { Content = "保存済みのAPIキーを削除する", Margin = new Thickness(0, 0, 0, 20) };
         form.Children.Add(clearKey);
+        var source = new ComboBox { DisplayMemberPath = "Value", SelectedValuePath = "Key" };
+        source.ItemsSource = new Dictionary<string, string> { ["riot"] = "Riot API（公式・APIキーが必要）", ["opgg"] = "OP.GG（非公式・APIキー不要）" };
+        source.SelectedValue = store.Read<string>("setting", "statsSource") == "opgg" ? "opgg" : "riot";
+        DialogLayout.Field(form, "ランク・戦績の取得元", source);
+        form.Children.Add(DialogLayout.Hint("OP.GGは非公式の取得方法です。仕様変更で突然使えなくなることがあり、OP.GG側の更新が遅れると最新の試合が含まれません。参考ランク帯はRiot API利用時のみ算出します。"));
         var path = new TextBox { Text = clientPath ?? "" };
         DialogLayout.Field(form, "Riotクライアント（RiotClientServices.exe）", path);
         var browse = new Button { Content = "実行ファイルを選択", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 16) };
@@ -128,6 +133,7 @@ public sealed class SettingsDialog : Window
                 if (clearKey.IsChecked == true) store.SetSecret("riot-api-key", "");
                 else if (!string.IsNullOrWhiteSpace(key.Password)) store.SetSecret("riot-api-key", key.Password.Trim());
                 store.Write("setting", "clientPath", selectedPath);
+                store.Write("setting", "statsSource", source.SelectedValue as string == "opgg" ? "opgg" : "riot");
                 key.Clear(); return true;
             }
             catch (Exception ex) when (ex is CryptographicException or SqliteException)

@@ -87,7 +87,9 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
     private async Task<RiotAccount> Resolve(RiotAccount account, CancellationToken ct, IProgress<string>? progress)
     {
         ct.ThrowIfCancellationRequested();
-        if (!string.IsNullOrEmpty(account.Lol.Puuid)) return account;
+        // A PUUID first obtained from OP.GG is encrypted for OP.GG and is rejected by the Riot API.
+        var previous = account.Lol.Puuid;
+        if (!string.IsNullOrEmpty(previous) && previous != OpggStatsProvider.Identity(store, account.Id)?.Puuid) return account;
         var profile = account.Lol;
         var identity = await api.GetAsync<Identity>(Regions.AccountRegional(profile.Platform),
             $"/riot/account/v1/accounts/by-riot-id/{Uri.EscapeDataString(profile.GameName)}/{Uri.EscapeDataString(profile.TagLine)}", ct, progress);
@@ -95,7 +97,8 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         // Preserve all game profiles and the user's Riot ID spelling when resolving the stable identifier.
         var updated = account with { Profiles = account.Profiles.Select(p => p.Game == "lol" ? p with { Puuid = identity.Puuid } : p).ToList() };
         ct.ThrowIfCancellationRequested();
-        store.Save(updated);
+        if (string.IsNullOrEmpty(previous)) store.Save(updated);
+        else store.ReplaceLolPuuid(account.Id, previous, identity.Puuid);
         return updated;
     }
 

@@ -5,9 +5,22 @@ public static class Analytics
     public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count)
     {
         var definition = Queues.Get(queue);
-        return cache.Matches
+        var eligible = cache.Matches
             .Where(m => definition.QueueIds.Contains(m.QueueId) && !m.Remake && m.DurationSeconds > 0 && m.Participants.Count(p => p.Puuid == puuid) == 1)
-            .DistinctBy(m => m.Id).OrderByDescending(m => m.StartedAt).Take(count).ToList();
+            .DistinctBy(m => m.Id).OrderByDescending(m => m.StartedAt).ToList();
+        // The same game fetched from both sources has unrelated IDs; keep the Riot API copy.
+        var riot = eligible.Where(m => !m.Id.StartsWith(OpggStatsProvider.MatchIdPrefix, StringComparison.Ordinal)).ToList();
+        return eligible.Where(m => !m.Id.StartsWith(OpggStatsProvider.MatchIdPrefix, StringComparison.Ordinal) || !riot.Any(r => SameGame(r, m, puuid)))
+            .Take(count).ToList();
+    }
+
+    private static bool SameGame(MatchRecord left, MatchRecord right, string puuid)
+    {
+        // OP.GG reports game creation and Riot the post-loading start, so allow a gap of a few minutes.
+        if (left.QueueId != right.QueueId || (left.StartedAt - right.StartedAt).Duration() > TimeSpan.FromMinutes(10)) return false;
+        var a = left.Participants.Single(p => p.Puuid == puuid);
+        var b = right.Participants.Single(p => p.Puuid == puuid);
+        return a.Champion == b.Champion && a.Kills == b.Kills && a.Deaths == b.Deaths && a.Assists == b.Assists && a.Win == b.Win;
     }
 
     public static List<Performance> Summarize(IEnumerable<MatchRecord> matches, string puuid, Func<Participant, string> group)

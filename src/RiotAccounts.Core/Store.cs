@@ -165,6 +165,32 @@ public sealed class Store
     public void SaveCache(Guid id, AccountCache cache)
     {
         using var c = Open(); using var tx = c.BeginTransaction();
+        SaveCache(c, tx, id, cache);
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Swaps the LoL PUUID for the same account obtained from another source (OP.GG's PUUID is encrypted differently
+    /// from the Riot API's) and re-keys saved matches, instead of discarding them as <see cref="Save"/> does on identity changes.
+    /// </summary>
+    public void ReplaceLolPuuid(Guid id, string previous, string replacement)
+    {
+        var account = Accounts().Single(a => a.Id == id);
+        if (account.Lol.Puuid != previous) throw new InvalidOperationException("アカウントのPUUIDが更新されています。もう一度実行してください。");
+        var cache = Cache(id);
+        cache.Matches = cache.Matches.Select(m => m.Participants.Any(p => p.Puuid == previous)
+            ? m with { Participants = m.Participants.Select(p => p.Puuid == previous ? p with { Puuid = replacement } : p).ToList() }
+            : m).ToList();
+        using var c = Open(); using var tx = c.BeginTransaction();
+        var profile = account.Lol with { Puuid = replacement };
+        Execute(c, tx, "UPDATE game_profiles SET json=$json WHERE account_id=$id AND game='lol'",
+            ("$id", id.ToString()), ("$json", JsonSerializer.Serialize(profile, Json)));
+        SaveCache(c, tx, id, cache);
+        tx.Commit();
+    }
+
+    private static void SaveCache(SqliteConnection c, SqliteTransaction tx, Guid id, AccountCache cache)
+    {
         var key = id.ToString();
         Execute(c, tx, "DELETE FROM game_records WHERE account_id=$id AND game='lol'", ("$id", key));
         void SaveRecord<T>(string kind, string recordId, T value) => Execute(c, tx,
@@ -175,7 +201,6 @@ public sealed class Store
         foreach (var opponent in cache.Opponents) SaveRecord("opponent", $"{opponent.QueueType}:{opponent.Puuid}:{opponent.ObservedAt.UtcTicks}", opponent);
         foreach (var forecast in cache.Forecasts) SaveRecord("forecast", $"{forecast.QueueType}:{forecast.CreatedAt.UtcTicks}", forecast);
         WriteDocument(c, tx, "cache", key, new AccountCache { MatchesUpdatedAt = cache.MatchesUpdatedAt, QueueUpdatedAt = cache.QueueUpdatedAt });
-        tx.Commit();
     }
 
     public void Save(RiotAccount account, Credentials? credentials = null)

@@ -15,7 +15,10 @@ public partial class MainWindow:Window
     private readonly string folder;
     private readonly HttpClient http=new(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(30)};
     private readonly RiotApi api;
-    private readonly LolStatsProvider provider;
+    private readonly LolStatsProvider riotProvider;
+    private readonly OpggApi opggApi;
+    private readonly OpggStatsProvider opggProvider;
+    private IGameStatsProvider Provider=>store.Read<string>("setting","statsSource")=="opgg"?opggProvider:riotProvider;
     private readonly NativeLogin login;
     private CancellationTokenSource? operation;
     private bool initialized;
@@ -24,10 +27,10 @@ public partial class MainWindow:Window
     public MainWindow(Store store,string folder)
     {
         this.store=store;this.folder=folder;
-        api=new(http,()=>store.GetSecret("riot-api-key"));provider=new(store,api);login=new(store);
+        api=new(http,()=>store.GetSecret("riot-api-key"));riotProvider=new(store,api);opggApi=new(http);opggProvider=new(store,opggApi);login=new(store);
         InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
-        Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();http.Dispose();};
+        Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
     }
     private void Reload(Guid? select=null)
     {
@@ -161,12 +164,12 @@ public partial class MainWindow:Window
     private async void RefreshAll_Click(object sender,RoutedEventArgs e)=>await Run(async(progress,ct)=>
     {
         var accounts=store.Accounts();if(accounts.Count==0){progress.Report("アカウントを追加してください。");return;}
-        for(var i=0;i<accounts.Count;i++){progress.Report($"ランクを更新中 {i+1}/{accounts.Count} — {accounts[i].Label}");await provider.RefreshRanksAsync(accounts[i],ct,progress);}
+        for(var i=0;i<accounts.Count;i++){progress.Report($"ランクを更新中 {i+1}/{accounts.Count} — {accounts[i].Label}");await Provider.RefreshRanksAsync(accounts[i],ct,progress);}
         progress.Report("全アカウントのランクを更新しました。");
     });
     private async void RefreshAnalysis_Click(object sender,RoutedEventArgs e)
     {
-        if(Selected is{} a){var queue=Queue;var count=CountPicker.SelectedIndex==1?50:20;await Run((progress,ct)=>provider.RefreshAnalysisAsync(a,queue,count,progress,ct));}
+        if(Selected is{} a){var queue=Queue;var count=CountPicker.SelectedIndex==1?50:20;await Run((progress,ct)=>Provider.RefreshAnalysisAsync(a,queue,count,progress,ct));}
     }
     private void Cancel_Click(object sender,RoutedEventArgs e)=>operation?.Cancel();
     private async void Settings_Click(object sender,RoutedEventArgs e)
