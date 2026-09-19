@@ -21,6 +21,7 @@ internal static class SmokeTests
             Check(report, "DPAPI CurrentUser roundtrip and tamper rejection", TestDpapi);
             Check(report, "SQLite persist/reopen/edit/delete and encrypted database/WAL", () => TestStore(directory));
             Check(report, "WPF main window and account/settings dialogs construct with dummy data", () => TestWindows(directory, artifactDirectory));
+            Check(report, "Setup validates path and empty-form confirmation without changing calibration", () => TestLoginSetup(directory, artifactDirectory));
             Check(report, "WPF normal match history/statistics and ranked/normal tab switching", () => TestNormalWindows(directory, artifactDirectory));
             Check(report, "WPF account reordering, selection retention, search/busy guards and drop geometry", () => TestAccountReordering(directory, artifactDirectory));
             Check(report, "Windows INPUT ABI and synthetic calibration image comparison", TestNativeHelpers);
@@ -189,6 +190,48 @@ internal static class SmokeTests
             }
             finally { window.Close(); }
         }
+    }
+
+    private static void TestLoginSetup(string directory, string? artifactDirectory)
+    {
+        var store = new Store(Path.Combine(directory, "setup-ui.db"), new WindowsProtector());
+        store.SetSecret("login-calibration-v2", "dummy-existing-calibration");
+        var window = new LoginSetupDialog(store, new NativeLogin(store), null);
+        try
+        {
+            var form = (StackPanel)((ScrollViewer)window.Content).Content;
+            var actions = (StackPanel)form.Children[2];
+            void Click(string title) => actions.Children.OfType<Button>().Single(b => (string)b.Content == title)
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Click("次へ：ログイン画面を準備");
+            Require(store.Read<string>("setting", "clientPath") == null);
+            Require(((TextBlock)form.Children[1]).Text.Contains("ファイルが見つかりません"));
+            // An inert local file validates navigation only; no client operation is invoked.
+            var client = Path.Combine(directory, "RiotClientServices.exe");
+            File.WriteAllText(client, "inert test fixture");
+            actions.Children.OfType<TextBox>().Single().Text = client;
+            Click("次へ：ログイン画面を準備");
+            Require(store.Read<string>("setting", "clientPath") == client);
+            Click("入力欄を確認する");
+            Require(((TextBlock)form.Children[1]).Text.Contains("確認欄にチェック"));
+            Require(!window.Completed);
+            var showRegistration = typeof(LoginSetupDialog).GetMethod("ShowRegistration", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            showRegistration.Invoke(window, new object?[] { null });
+            Click("位置登録を開始（1/3 ID欄から）");
+            Require(((TextBlock)form.Children[1]).Text.Contains("確認欄にチェック"));
+            Require(store.GetSecret("login-calibration-v2") == "dummy-existing-calibration");
+            if (artifactDirectory != null)
+            {
+                Directory.CreateDirectory(artifactDirectory);
+                Render(window, Path.Combine(artifactDirectory, "self-test-setup-registration.png"));
+            }
+            Click("戻って入力欄を再確認");
+            Require(actions.Children.OfType<CheckBox>().Single().IsChecked != true);
+            Click("戻る：クライアントの場所");
+            Require(actions.Children.OfType<TextBox>().Single().Text == client);
+            Require(store.GetSecret("login-calibration-v2") == "dummy-existing-calibration");
+        }
+        finally { window.Close(); }
     }
 
     private static void TestNormalWindows(string directory, string? artifactDirectory)

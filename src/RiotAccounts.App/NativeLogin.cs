@@ -12,6 +12,7 @@ public interface IRiotLoginAutomation
     Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct);
 }
 public sealed record InputBounds(int X,int Y,int Width,int Height);
+public sealed record CalibrationProgress(int Step,string Field);
 public sealed record Calibration(int Width,int Height,uint Dpi,string ClientVersion,int UserX,int UserY,int PasswordX,int PasswordY,int SubmitX,int SubmitY,byte[] Template,int SchemaVersion=0,InputBounds? UserBounds=null,InputBounds? PasswordBounds=null,byte[]? PasswordTemplate=null,InputBounds? SubmitBounds=null,string? SubmitName=null,string? SubmitAutomationId=null);
 public sealed class NativeLogin(Store store):IRiotLoginAutomation
 {
@@ -76,6 +77,24 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         catch(System.Runtime.InteropServices.COMException){ }
         return null;
     }
+    // Setup inspection never reads credentials, types text, or submits the form.
+    public async Task OpenForSetupAsync(CancellationToken ct)
+    {
+        using var process=await OpenClient(ct);
+        Win.ShowWindow(process.MainWindowHandle,9);
+        Win.SetForegroundWindow(process.MainWindowHandle);
+    }
+    public async Task<bool> CheckFieldsAsync(CancellationToken ct)
+    {
+        using var process=await OpenClient(ct);
+        var hwnd=process.MainWindowHandle;
+        Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
+        using var target=new Target(process,hwnd);
+        target.Check(ct);
+        var fields=await Task.Run(()=>Detect(target),ct);
+        target.Check(ct);
+        return fields!=null;
+    }
     public async Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct)
     {
         if(string.IsNullOrWhiteSpace(credentials.Username)||string.IsNullOrEmpty(credentials.Password)||credentials.Username.Any(char.IsControl)||credentials.Password.Any(char.IsControl))
@@ -92,7 +111,7 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         var calibration=savedCalibration==null?null:JsonSerializer.Deserialize<Calibration>(savedCalibration);
         if(fields==null)
         {
-            if(calibration==null)throw new InvalidOperationException("入力欄を検出できません。設定の「ログイン位置を登録」を実行してください。");
+            if(calibration==null)throw new InvalidOperationException("入力欄を検出できません。設定の「自動入力を設定する」を開いてください。");
             ValidateCalibrationGeometry(target,calibration,ct);
         }
         var user=await Focus(target,fields?.User,calibration?.UserX??0,calibration?.UserY??0,false,ct);
@@ -223,7 +242,7 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         if(!Win.GetCursorPos(out var current)||current.X!=verified.X||current.Y!=verified.Y)throw UnsafeFocus();
         Win.Click();
     }
-    public async Task<Calibration> CalibrateAsync(IProgress<string> progress,CancellationToken ct)
+    public async Task<Calibration> CalibrateAsync(IProgress<CalibrationProgress> progress,CancellationToken ct)
     {
         using var process=await OpenClient(ct);var hwnd=process.MainWindowHandle;
         Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(400,ct);
@@ -231,7 +250,7 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         var points=new List<Win.Point>();
         foreach(var label in new[]{"ID欄","パスワード欄","ログインボタン"})
         {
-            progress.Report($"空のRiotログインフォームの{label}にマウスを置き、F8を押してください。Escで中止します。");
+            progress.Report(new(points.Count+1,label));
             while((Win.GetAsyncKeyState(0x77)&0x8000)!=0){target.Check(ct);await Task.Delay(50,ct);}
             while((Win.GetAsyncKeyState(0x77)&0x8000)==0){target.Check(ct);await Task.Delay(50,ct);}
             target.Check(ct);

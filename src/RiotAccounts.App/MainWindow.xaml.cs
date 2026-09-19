@@ -172,36 +172,23 @@ public partial class MainWindow:Window
         if(Selected is{} a){var queue=Queue;var count=CountPicker.SelectedIndex==1?50:20;await Run((progress,ct)=>Provider.RefreshAnalysisAsync(a,queue,count,progress,ct));}
     }
     private void Cancel_Click(object sender,RoutedEventArgs e)=>operation?.Cancel();
-    private async void Settings_Click(object sender,RoutedEventArgs e)
+    private void Settings_Click(object sender,RoutedEventArgs e)
     {
         if(operation!=null)return;
-        SettingsDialog dialog;
         try
         {
             string? clientPath;
             try{clientPath=login.ClientPath();}catch(Exception ex) when(ex is System.Text.Json.JsonException or IOException){clientPath=null;}
-            dialog=new SettingsDialog(store,clientPath,folder){Owner=this};dialog.ShowDialog();
+            var dialog=new SettingsDialog(store,clientPath,folder){Owner=this};
+            dialog.ShowDialog();
+            if(dialog.SetupRequested)
+            {
+                var setup=new LoginSetupDialog(store,login,clientPath){Owner=this};
+                setup.ShowDialog();
+                StatusText.Text=setup.Completed ? "自動入力の設定を確認しました。「Riotにログイン」から利用できます。" : "設定の案内を閉じました。";
+            }
         }
         catch(Exception ex) when(ex is CryptographicException or Microsoft.Data.Sqlite.SqliteException)
-        {StatusText.Text="設定を開けません。保存先と、登録したWindowsユーザーを確認してください。";return;}
-        if(!dialog.CalibrateRequested)return;
-        Window? prompt=null;TextBlock? label=null;
-        await Run(async(progress,ct)=>
-        {
-            try
-            {
-                var calibrationProgress=new Progress<string>(message=>
-                {
-                    progress.Report(message);
-                    if(prompt==null)
-                    {
-                        label=new TextBlock{Margin=new Thickness(18),Width=310};prompt=new Window{Title="位置登録",Content=label,SizeToContent=SizeToContent.WidthAndHeight,Topmost=true,ShowActivated=false,WindowStyle=WindowStyle.ToolWindow,Left=10,Top=10};prompt.Show();
-                    }
-                    label!.Text=message;
-                });
-                await login.CalibrateAsync(calibrationProgress,ct);progress.Report("ログイン位置を登録しました。");
-            }
-            finally{prompt?.Close();}
-        });
+        {StatusText.Text="設定を開けません。保存先と、登録したWindowsユーザーを確認してください。";}
     }
 }

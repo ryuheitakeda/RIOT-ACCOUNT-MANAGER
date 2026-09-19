@@ -88,11 +88,17 @@ public sealed class AccountDialog : Window
 
 public sealed class SettingsDialog : Window
 {
-    public bool CalibrateRequested { get; private set; }
+    public bool SetupRequested { get; private set; }
 
     public SettingsDialog(Store store, string? clientPath, string folder)
     {
         var form = DialogLayout.Form(this, "設定", 580);
+        form.Children.Add(new TextBlock { Text = "自動入力", FontSize = 20, FontWeight = FontWeights.SemiBold });
+        form.Children.Add(DialogLayout.Hint("準備から入力欄の確認まで順番に案内します。APIキーは不要です。"));
+        form.Children.Add(DialogLayout.Hint(clientPath == null ? "Riotクライアント：未検出（案内の中で選択できます）" : "Riotクライアント：検出済み"));
+        var setup = new Button { Content = "自動入力を設定する", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 24), Style = (Style)FindResource("Primary") };
+        form.Children.Add(setup);
+        form.Children.Add(new TextBlock { Text = "ランク・戦績用APIキー", FontSize = 20, FontWeight = FontWeights.SemiBold });
         var key = new PasswordBox();
         var hasKey = !string.IsNullOrEmpty(store.GetSecret("riot-api-key"));
         DialogLayout.Field(form, hasKey ? "Riot APIキー（登録済み／空欄なら変更しません）" : "Riot APIキー", key);
@@ -107,42 +113,26 @@ public sealed class SettingsDialog : Window
         source.SelectedValue = store.Read<string>("setting", "statsSource") == "opgg" ? "opgg" : "riot";
         DialogLayout.Field(form, "ランク・戦績の取得元", source);
         form.Children.Add(DialogLayout.Hint("OP.GGは非公式の取得方法です。仕様変更で突然使えなくなることがあり、OP.GG側の更新が遅れると最新の試合が含まれません。参考ランク帯はRiot API利用時のみ算出します。"));
-        var path = new TextBox { Text = clientPath ?? "" };
-        DialogLayout.Field(form, "Riotクライアント（RiotClientServices.exe）", path);
-        var browse = new Button { Content = "実行ファイルを選択", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 16) };
-        browse.Click += (_, _) =>
-        {
-            var picker = new Microsoft.Win32.OpenFileDialog { Filter = "Riot Client|RiotClientServices.exe", CheckFileExists = true };
-            if (picker.ShowDialog(this) == true) path.Text = picker.FileName;
-        };
-        form.Children.Add(browse);
-        form.Children.Add(DialogLayout.Hint("位置登録を使う場合は、先にRiotクライアントからログアウトし、ID・パスワードが空のログイン画面にしてください。登録時は各入力欄とログインボタンにマウスを置き、F8で確定します。Escで中止できます。"));
-        var emptyConfirmed = new CheckBox { Content = "RiotのID・パスワード欄がどちらも空であることを確認しました", Margin = new Thickness(0, 0, 0, 12) };
-        form.Children.Add(emptyConfirmed);
-        var calibrate = new Button { Content = "保存してログイン位置を登録", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 16) };
-        form.Children.Add(calibrate);
         form.Children.Add(DialogLayout.Hint($"保存先：{folder}\n暗号化データは別のWindowsユーザーでは復号できません。"));
         var error = DialogLayout.Hint(""); error.Foreground = System.Windows.Media.Brushes.Firebrick; form.Children.Add(error);
         bool Save()
         {
-            var selectedPath = path.Text.Trim().Trim('"');
-            if (selectedPath.Length > 0 && (!File.Exists(selectedPath) || !string.Equals(Path.GetFileName(selectedPath), "RiotClientServices.exe", StringComparison.OrdinalIgnoreCase)))
-            { error.Text = "実在するRiotClientServices.exeを選択してください。"; return false; }
             try
             {
                 if (clearKey.IsChecked == true) store.SetSecret("riot-api-key", "");
                 else if (!string.IsNullOrWhiteSpace(key.Password)) store.SetSecret("riot-api-key", key.Password.Trim());
-                store.Write("setting", "clientPath", selectedPath);
                 store.Write("setting", "statsSource", source.SelectedValue as string == "opgg" ? "opgg" : "riot");
                 key.Clear(); return true;
             }
             catch (Exception ex) when (ex is CryptographicException or SqliteException)
             { error.Text = "設定を保存できませんでした。保存先のアクセス権を確認してください。"; return false; }
         }
-        calibrate.Click += (_, _) =>
+        setup.Click += (_, _) =>
         {
-            if (emptyConfirmed.IsChecked != true) { error.Text = "空のログイン画面を用意して、確認欄をチェックしてください。"; return; }
-            if (Save()) { CalibrateRequested = true; DialogResult = true; }
+            var savedSource = store.Read<string>("setting", "statsSource") == "opgg" ? "opgg" : "riot";
+            if (!string.IsNullOrEmpty(key.Password) || clearKey.IsChecked == true || source.SelectedValue as string != savedSource)
+            { error.Text = "APIキー・取得元の変更を先に「保存」してから、自動入力の設定を開いてください。"; return; }
+            SetupRequested = true; DialogResult = true;
         };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var cancel = new Button { Content = "キャンセル", IsCancel = true };
