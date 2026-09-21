@@ -88,7 +88,7 @@ public sealed class LoginSetupDialog : Window
     private void ShowPreparation(string? notice = null)
     {
         Page("2. ログイン画面の準備", (notice == null ? "" : notice + "\n\n") +
-            "① Riotクライアントを開きます。\n② ログイン中ならログアウトします。\n③ ID・パスワードを両方空にして、この案内へ戻ります。");
+            "① Riotクライアントを開きます。\n② ログイン中ならログアウトします。\n③ ID・パスワードを両方空にして、この案内へ戻ります。\n\n現在のRiotクライアントは、入力欄をアプリから直接識別できません。そのため、入力欄の位置を登録し、画面の見た目で確認しながら入力します。");
         Button("Riotクライアントを開く", () => Start(async ct =>
         {
             await login.OpenForSetupAsync(ct);
@@ -96,14 +96,14 @@ public sealed class LoginSetupDialog : Window
         }, false));
         var empty = new CheckBox { Content = new TextBlock { Text = "ID・パスワード欄を両方空にしました" }, Margin = new Thickness(0, 8, 0, 16) };
         actions.Children.Add(empty);
-        Button("入力欄を確認する", () =>
+        Button("Riot画面を確認する", () =>
         {
             if (empty.IsChecked != true) { message.Text = "Riotのログイン画面でID・パスワード欄を空にして、確認欄にチェックしてください。"; return; }
             Start(async ct =>
             {
-                var check = await login.CheckFieldsAsync(ct);
-                if (check.Found) ShowComplete(false);
-                else ShowRegistration($"入力欄を自動で見つけられませんでした（{check.Detail}）。位置を指定して確認できます。");
+                var check = await login.CheckClientAsync(ct);
+                if (check.Registered) ShowComplete(false, check.Detail);
+                else ShowRegistration($"Riot画面を確認しました（{check.Detail}）。この画面での入力位置が未登録です。位置を登録してください。");
             });
         }, true);
         Button("戻る：クライアントの場所", () => ShowClient(login.ClientPath()));
@@ -112,11 +112,11 @@ public sealed class LoginSetupDialog : Window
 
     private void ShowRegistration(string? notice = null)
     {
-        Page("3. 入力位置の登録", (notice ?? "入力欄を自動で見つけられませんでした。位置を指定して確認できます。") +
-            "\n\nID欄 → パスワード欄 → ログインボタンの順に、マウスを置いてF8を押します。クリックは不要です。Escで中止できます。\n\n開始前にID・パスワード欄が両方空であることを確認してください。");
+        Page("3. 入力位置の登録", (notice ?? "入力位置を登録してください。") +
+            "\n\nID欄 → パスワード欄の順に、入力欄の中央にマウスを置いてF8を押します（ID欄を上、パスワード欄を下）。登録の最後に、アプリが各欄を1回ずつクリックして空の状態を記録します。Escで中止できます。\n\n開始前にID・パスワード欄が両方空であることを確認してください。");
         var empty = new CheckBox { Content = new TextBlock { Text = "ID・パスワード欄が両方空であることを確認しました" }, Margin = new Thickness(0, 0, 0, 16) };
         actions.Children.Add(empty);
-        Button("位置登録を開始（1/3 ID欄から）", () =>
+        Button("位置登録を開始（1/2 ID欄から）", () =>
         {
             if (empty.IsChecked != true) { message.Text = "両方の入力欄を空にして、確認欄にチェックしてください。"; return; }
             Start(async ct =>
@@ -132,7 +132,7 @@ public sealed class LoginSetupDialog : Window
                 var active = true;
                 var progress = new Progress<CalibrationProgress>(step =>
                 {
-                    if (active) label.Text = $"{step.Step}/3  {step.Field}\n\n{step.Field}にマウスを置いてF8を押してください。\nEsc：中止";
+                    if (active) label.Text = $"{step.Step}/2  {step.Field}\n\n{step.Field}にマウスを置いてF8を押してください。\nEsc：中止";
                 });
                 // Preserve the modal session while Riot owns foreground focus.
                 Opacity = 0;
@@ -157,15 +157,16 @@ public sealed class LoginSetupDialog : Window
         Button("アカウント画面へ戻る", Close, true);
     }
 
-    private void ShowComplete(bool registered)
+    private void ShowComplete(bool registered, string? detail = null)
     {
         Completed = true;
-        Page("設定の確認が完了しました", registered
+        Page("入力位置の登録が完了しました", registered
             ? "ログイン位置を登録しました。画面サイズ・表示倍率・クライアントの更新で配置が変わった場合は、この案内から再登録してください。"
-            : "入力欄を確認できました。位置登録は不要です。");
-        actions.Children.Add(DialogLayout.Hint("入力欄の検出だけでは、実際に文字が入るかは分かりません。試験入力で確認できます（ダミー文字を入力して消去します。ID・パスワードの入力やログイン送信はしません）。"));
-        Button("試験入力を確認する", RunInputTest);
-        Button("アカウント画面へ戻る", Close, true);
+            : $"登録済みの入力位置が、いまのRiot画面で使えます（{detail}）。");
+        actions.Children.Add(DialogLayout.Hint("登録しただけでは、実際に文字が入るかは分かりません。試験入力で確認してください（ダミー文字を入力して消去します。ID・パスワードの入力やログイン送信はしません）。"));
+        Button("試験入力を確認する", RunInputTest, true);
+        if (!registered) Button("位置を登録し直す", () => ShowRegistration());
+        Button("アカウント画面へ戻る", Close);
     }
 
     private void RunInputTest() => Start(async ct =>

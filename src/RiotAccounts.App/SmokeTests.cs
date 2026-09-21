@@ -197,7 +197,7 @@ internal static class SmokeTests
     private static void TestLoginSetup(string directory, string? artifactDirectory)
     {
         var store = new Store(Path.Combine(directory, "setup-ui.db"), new WindowsProtector());
-        store.SetSecret("login-calibration-v2", "dummy-existing-calibration");
+        store.SetSecret("login-calibration-v3", "dummy-existing-calibration");
         var window = new LoginSetupDialog(store, new NativeLogin(store), null);
         try
         {
@@ -214,14 +214,14 @@ internal static class SmokeTests
             actions.Children.OfType<TextBox>().Single().Text = client;
             Click("次へ：ログイン画面を準備");
             Require(store.Read<string>("setting", "clientPath") == client);
-            Click("入力欄を確認する");
+            Click("Riot画面を確認する");
             Require(((TextBlock)form.Children[1]).Text.Contains("確認欄にチェック"));
             Require(!window.Completed);
             var showRegistration = typeof(LoginSetupDialog).GetMethod("ShowRegistration", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             showRegistration.Invoke(window, new object?[] { null });
-            Click("位置登録を開始（1/3 ID欄から）");
+            Click("位置登録を開始（1/2 ID欄から）");
             Require(((TextBlock)form.Children[1]).Text.Contains("確認欄にチェック"));
-            Require(store.GetSecret("login-calibration-v2") == "dummy-existing-calibration");
+            Require(store.GetSecret("login-calibration-v3") == "dummy-existing-calibration");
             if (artifactDirectory != null)
             {
                 Directory.CreateDirectory(artifactDirectory);
@@ -231,7 +231,7 @@ internal static class SmokeTests
             Require(actions.Children.OfType<CheckBox>().Single().IsChecked != true);
             Click("戻る：クライアントの場所");
             Require(actions.Children.OfType<TextBox>().Single().Text == client);
-            Require(store.GetSecret("login-calibration-v2") == "dummy-existing-calibration");
+            Require(store.GetSecret("login-calibration-v3") == "dummy-existing-calibration");
         }
         finally { window.Close(); }
     }
@@ -510,44 +510,30 @@ internal static class SmokeTests
     private static void TestNativeHelpers()
     {
         Require(Win.InputSize == (IntPtr.Size == 8 ? 40 : 28));
-        var blank = MakeImage(false);
-        var changed = MakeImage(true);
-        var onePixel = MakeImage(false, true);
-        Require(NativeLogin.TemplatesMatch(blank, blank, 500, 300, 150, 90, 150, 190));
-        Require(!NativeLogin.TemplatesMatch(blank, changed, 500, 300, 150, 90, 150, 190));
-        Require(!NativeLogin.TemplatesMatch(blank, onePixel, 500, 300, 150, 90, 150, 190));
-        Require(!NativeLogin.TemplatesMatch(blank, blank, 501, 300, 150, 90, 150, 190));
-        // Typed-text detection: a caret-sized change is not text; a run of dots is; size mismatch fails closed.
-        var field = new InputBounds(40, 80, 200, 30);
-        Require(NativeLogin.TextAppeared(blank, Shape(48, 60, 12), 500, 300, field, 4));
-        Require(NativeLogin.TextAppeared(blank, Shape(48, 6, 6), 500, 300, field, 1));
-        Require(!NativeLogin.TextAppeared(blank, Shape(48, 2, 16), 500, 300, field, 4));
-        Require(!NativeLogin.TextAppeared(blank, blank, 500, 300, field, 4));
-        Require(!NativeLogin.TextAppeared(blank, Shape(48, 60, 12), 501, 300, field, 4));
-        Require(!NativeLogin.TextAppeared(blank, Shape(300, 60, 12), 500, 300, field, 4));
+        // Blank vs typed detection on same-size field strips (200x30 at 96 dpi).
+        var blank = Strip(0, 0);
+        Require(NativeLogin.LooksBlank(blank, Strip(0, 0), 96));
+        Require(NativeLogin.LooksBlank(blank, Strip(50, 2), 96));   // blinking caret only
+        Require(!NativeLogin.LooksBlank(blank, Strip(50, 6), 96));  // one glyph left behind
+        Require(!NativeLogin.LooksBlank(blank, Strip(50, 60), 96));
+        Require(NativeLogin.TextAppeared(blank, Strip(20, 60), 4, 96));
+        Require(NativeLogin.TextAppeared(blank, Strip(20, 6), 1, 96));
+        Require(!NativeLogin.TextAppeared(blank, Strip(20, 2), 4, 96));  // caret is not text
+        Require(!NativeLogin.TextAppeared(blank, blank, 4, 96));
+        Require(!NativeLogin.TextAppeared(blank, Strip(20, 60), 0, 96));
+        Require(NativeLogin.ChangedColumns(blank, new byte[] { 1, 2, 3 }) == -1);  // undecodable
+        Require(NativeLogin.ChangedColumns(blank, StripOfSize(100, 30)) == -1);    // size mismatch
+        Require(NativeLogin.TextAppeared(blank, Strip(20, 60), 4, 144) && !NativeLogin.LooksBlank(blank, Strip(50, 6), 144));
 
-        static byte[] Shape(int x, int width, int height)
+        static byte[] Strip(int x, int width) => StripOfSize(200, 30, x, width);
+        static byte[] StripOfSize(int w, int h, int x = 0, int width = 0)
         {
-            using var bitmap = new System.Drawing.Bitmap(500, 300);
+            using var bitmap = new System.Drawing.Bitmap(w, h);
             using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
             {
                 graphics.Clear(System.Drawing.Color.White);
-                graphics.FillRectangle(System.Drawing.Brushes.Black, x, 86, width, height);
+                if (width > 0) graphics.FillRectangle(System.Drawing.Brushes.Black, x, 8, width, 14);
             }
-            using var stream = new MemoryStream();
-            bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
-            return stream.ToArray();
-        }
-
-        static byte[] MakeImage(bool changed, bool onePixel = false)
-        {
-            using var bitmap = new System.Drawing.Bitmap(500, 300);
-            using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
-            {
-                graphics.Clear(System.Drawing.Color.White);
-                if (changed) graphics.FillRectangle(System.Drawing.Brushes.Black, 40, 80, 180, 15);
-            }
-            if (onePixel) bitmap.SetPixel(127, 90, System.Drawing.Color.Black);
             using var stream = new MemoryStream();
             bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
             return stream.ToArray();
@@ -556,8 +542,8 @@ internal static class SmokeTests
 
     private static void TestCalibrationGeometry()
     {
-        var calibration = new Calibration(800, 600, 96, "dummy-version", 100, 100, 100, 200, 150, 300, [1], 2,
-            new(40, 80, 250, 40), new(40, 180, 250, 40), [1], new(120, 280, 60, 40));
+        var calibration = new Calibration(800, 600, 96, "dummy-version", 200, 100, 200, 200, [1], [1],
+            new(30, 86, 340, 28), new(30, 186, 340, 28));
         Require(NativeLogin.CalibrationGeometryMatches(calibration, 800, 600, 96, "dummy-version"));
         Require(!NativeLogin.CalibrationGeometryMatches(calibration, 801, 600, 96, "dummy-version"));
         Require(!NativeLogin.CalibrationGeometryMatches(calibration, 800, 601, 96, "dummy-version"));
@@ -565,10 +551,11 @@ internal static class SmokeTests
         Require(!NativeLogin.CalibrationGeometryMatches(calibration, 800, 600, 96, "updated-version"));
         foreach (var invalid in new[]
         {
-            calibration with { SchemaVersion = 0 }, calibration with { UserBounds = null },
-            calibration with { PasswordBounds = new(799, 180, 250, 40) }, calibration with { UserX = 799 },
-            calibration with { PasswordY = 599 }, calibration with { SubmitX = 800 },
-            calibration with { PasswordTemplate = null }
+            calibration with { SchemaVersion = 2 }, calibration with { UserBounds = null },
+            calibration with { PasswordBounds = new(500, 186, 340, 28) }, calibration with { UserX = 799 },
+            calibration with { PasswordY = 599 }, calibration with { PasswordTemplate = [] },
+            calibration with { PasswordBounds = new(30, 100, 340, 28), PasswordY = 110 },   // strips overlap
+            calibration with { UserY = 200, PasswordY = 100 }                                // password above ID
         }) Require(!NativeLogin.CalibrationGeometryMatches(invalid, 800, 600, 96, "dummy-version"));
     }
 }
