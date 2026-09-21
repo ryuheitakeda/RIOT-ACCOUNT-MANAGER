@@ -3,7 +3,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Windows.Automation;
 
 namespace RiotAccounts.App;
 
@@ -12,9 +11,17 @@ public interface IRiotLoginAutomation
     Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct);
 }
 public sealed record InputBounds(int X,int Y,int Width,int Height);
-public sealed record Calibration(int Width,int Height,uint Dpi,string ClientVersion,int UserX,int UserY,int PasswordX,int PasswordY,int SubmitX,int SubmitY,byte[] Template,int SchemaVersion=0,InputBounds? UserBounds=null,InputBounds? PasswordBounds=null,byte[]? PasswordTemplate=null,InputBounds? SubmitBounds=null,string? SubmitName=null,string? SubmitAutomationId=null);
-public sealed class NativeLogin(Store store):IRiotLoginAutomation
+public sealed record CalibrationProgress(int Step,string Field);
+// The current Riot client (Electron) exposes no UI Automation tree, so each field is registered as a point plus a
+// pixel strip of the blank, focused form. Login clicks the point, requires the strip to match, and confirms typing by pixels.
+public sealed record Calibration(int Width,int Height,uint Dpi,string ClientVersion,int UserX,int UserY,int PasswordX,int PasswordY,byte[] Template,byte[] PasswordTemplate,InputBounds? UserBounds,InputBounds? PasswordBounds,int SchemaVersion=3);
+public sealed record ClientCheck(bool Found,bool Registered,string Detail);
+public sealed class NativeLogin(Store store,DiagnosticLog? log=null):IRiotLoginAutomation
 {
+    private const string CalibrationKey="login-calibration-v3";
+    private static readonly string[] ClientProcesses=["Riot Client","RiotClientUx"];
+    public string? LogPath=>log?.FilePath;
+    private void Log(string stage,string message)=>log?.Write(stage,message);
     public string? ClientPath()
     {
         var custom=store.Read<string>("setting","clientPath");
@@ -27,173 +34,184 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         return null;
     }
     private static string? ValidateClientPath(string path)=>File.Exists(path)&&string.Equals(Path.GetFileName(path),"RiotClientServices.exe",StringComparison.OrdinalIgnoreCase)?Path.GetFullPath(path):null;
+    // The client UI process is "Riot Client" (Electron, under RiotClientElectron) today and was "RiotClientUx" before.
+    // Only the process that owns the visible top-level window counts; helper processes have none.
     private Process? FindClient()
     {
         var root=Path.GetDirectoryName(ClientPath()??throw new InvalidOperationException("設定でRiotClientServices.exeを選択してください。"))!;
         Process? found=null;
-        foreach(var process in Process.GetProcessesByName("RiotClientUx"))
-        {
-            try
+        foreach(var name in ClientProcesses)
+            foreach(var process in Process.GetProcessesByName(name))
             {
-                var executable=process.MainModule?.FileName;
-                var hwnd=process.MainWindowHandle;
-                if(!process.HasExited&&hwnd!=IntPtr.Zero&&Win.IsWindowVisible(hwnd)&&executable!=null&&Path.GetFullPath(executable).StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    if(found!=null)
+                    var hwnd=process.MainWindowHandle;
+                    if(process.HasExited||hwnd==IntPtr.Zero||!Win.IsWindowVisible(hwnd))continue;
+                    var executable=process.MainModule?.FileName;
+                    if(executable!=null&&Path.GetFullPath(executable).StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))
                     {
-                        found.Dispose();found=null;
-                        throw new InvalidOperationException("Riot画面が複数あります。対象以外のRiotクライアントを閉じて再試行してください。");
+                        if(found!=null)
+                        {
+                            found.Dispose();found=null;
+                            throw new InvalidOperationException("Riot画面が複数あります。対象以外のRiotクライアントを閉じて再試行してください。");
+                        }
+                        found=process;
                     }
-                    found=process;
                 }
+                catch(System.ComponentModel.Win32Exception){ }
+                catch(InvalidOperationException) when(process.HasExited){ }
+                finally{if(!ReferenceEquals(found,process))process.Dispose();}
             }
-            catch(System.ComponentModel.Win32Exception){ }
-            catch(InvalidOperationException) when(process.HasExited){ }
-            finally{if(!ReferenceEquals(found,process))process.Dispose();}
-        }
         return found;
     }
     private async Task<Process> OpenClient(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var found=FindClient();if(found!=null)return found;
+        var found=await Task.Run(FindClient,ct);if(found!=null)return found;
         using var started=Process.Start(new ProcessStartInfo(ClientPath()??throw new InvalidOperationException("Riotクライアントが見つかりません。設定で実行ファイルを選択してください。")){UseShellExecute=true});
-        for(var i=0;i<60;i++){await Task.Delay(500,ct);found=FindClient();if(found!=null)return found;}
-        throw new InvalidOperationException("Riotのログイン画面を開いてから再試行してください。");
+        for(var i=0;i<60;i++){await Task.Delay(500,ct);found=await Task.Run(FindClient,ct);if(found!=null)return found;}
+        Log("クライアント検出","表示中のRiot Client（またはRiotClientUx）のウィンドウが30秒以内に見つかりませんでした");
+        throw new InvalidOperationException("Riotクライアントの画面が見つかりません。Riotクライアントを開き、ログイン画面を表示してから再試行してください。");
     }
-    private static (AutomationElement User,AutomationElement Password)? Detect(Target target)
+    // Setup inspection never reads credentials, types text, or submits the form.
+    public async Task OpenForSetupAsync(CancellationToken ct)
+    {
+        using var process=await OpenClient(ct);
+        Win.ShowWindow(process.MainWindowHandle,9);
+        Win.SetForegroundWindow(process.MainWindowHandle);
+    }
+    public async Task<ClientCheck> CheckClientAsync(CancellationToken ct)
     {
         try
         {
-            var root=AutomationElement.FromHandle(target.Hwnd);
-            var edits=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit))
-                .Cast<AutomationElement>().Where(e=>ValidField(target,e,null)).ToList();
-            var passwords=edits.Where(e=>e.Current.IsPassword).ToList();
-            var users=edits.Where(e=>!e.Current.IsPassword).ToList();
-            if(passwords.Count==1&&users.Count==1)return(users[0],passwords[0]);
+            using var process=await OpenClient(ct);
+            var hwnd=process.MainWindowHandle;
+            Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
+            using var target=new Target(process,hwnd);
+            target.Check(ct);
+            var registered=false;
+            if(store.GetSecret(CalibrationKey) is{Length:>0} saved)
+                try{registered=JsonSerializer.Deserialize<Calibration>(saved) is{} c&&CalibrationGeometryMatches(c,target.Width,target.Height,target.Dpi,target.Version);}
+                catch(JsonException){ }
+            var detail=$"Riot画面 {target.Width}x{target.Height}・{target.Dpi}dpi・v{target.Version}";
+            Log("画面確認",detail+(registered?"（登録済みの位置が有効）":"（位置は未登録、または画面構成が変わっています）"));
+            return new(true,registered,detail);
         }
-        catch(ElementNotAvailableException){ }
-        catch(System.Runtime.InteropServices.COMException){ }
-        return null;
+        catch(OperationCanceledException){Log("画面確認","中止");throw;}
+        catch(Exception ex){Log("画面確認",$"{ex.GetType().Name}: {ex.Message}");throw;}
     }
-    public async Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct)
+    private Calibration LoadCalibration()
+    {
+        var saved=store.GetSecret(CalibrationKey);
+        if(string.IsNullOrEmpty(saved))throw new InvalidOperationException("自動入力の位置が登録されていません。設定の「自動入力を設定する」で位置を登録してください。");
+        try{return JsonSerializer.Deserialize<Calibration>(saved)??throw new JsonException();}
+        catch(JsonException){throw new InvalidOperationException("登録済みの位置を読み取れません。設定の「自動入力を設定する」で登録し直してください。");}
+    }
+    public Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct)=>EnterAsync(credentials,true,progress,ct);
+    // Types dummy text with the same code path as login, checks it appeared, then clears it. Never submits the form.
+    public Task TestInputAsync(IProgress<string> progress,CancellationToken ct)=>EnterAsync(new Credentials("test-user","Dummy-Pass-1234"),false,progress,ct);
+    private async Task EnterAsync(Credentials credentials,bool submit,IProgress<string> progress,CancellationToken ct)
     {
         if(string.IsNullOrWhiteSpace(credentials.Username)||string.IsNullOrEmpty(credentials.Password)||credentials.Username.Any(char.IsControl)||credentials.Password.Any(char.IsControl))
             throw new InvalidOperationException("ログインIDとパスワードを確認してください。空欄・制御文字は入力できません。");
-        progress.Report("Riotのログイン画面を確認中… Escで中止できます。入力中はキーボード・マウスを操作しないでください。");
-        using var process=await OpenClient(ct);
-        var hwnd=process.MainWindowHandle;
-        Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
-        using var target=new Target(process,hwnd);
-        target.Check(ct);
-        var fields=await Task.Run(()=>Detect(target),ct);
-        target.Check(ct);
-        var savedCalibration=fields==null?store.GetSecret("login-calibration-v2"):null;
-        var calibration=savedCalibration==null?null:JsonSerializer.Deserialize<Calibration>(savedCalibration);
-        if(fields==null)
+        var stage="クライアント検出";
+        try
         {
-            if(calibration==null)throw new InvalidOperationException("入力欄を検出できません。設定の「ログイン位置を登録」を実行してください。");
+            progress.Report("Riotのログイン画面を確認中… Escで中止できます。入力中はキーボード・マウスを操作しないでください。");
+            using var process=await OpenClient(ct);
+            var hwnd=process.MainWindowHandle;
+            Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
+            using var target=new Target(process,hwnd);
+            target.Check(ct);
+            stage="登録位置の確認";
+            var calibration=LoadCalibration();
             ValidateCalibrationGeometry(target,calibration,ct);
+            Log(stage,$"{(submit?"ログイン":"試験入力")}: 画面{target.Width}x{target.Height}・{target.Dpi}dpiの登録位置を使用");
+            var user=calibration.UserBounds!;var password=calibration.PasswordBounds!;
+            stage="ID欄の確認";
+            var userBefore=await FocusField(target,calibration.UserX,calibration.UserY,user,calibration.Template,"ID欄",ct);
+            stage="ID入力";
+            progress.Report("IDを入力中…");
+            await TypeText(target,user,userBefore,credentials.Username,ct);
+            Log(stage,"入力を確認しました");
+            stage="パスワード欄の確認";
+            var passwordBefore=await FocusField(target,calibration.PasswordX,calibration.PasswordY,password,calibration.PasswordTemplate,"パスワード欄",ct);
+            stage="パスワード入力";
+            progress.Report("パスワードを入力中…");
+            await TypeText(target,password,passwordBefore,credentials.Password,ct);
+            Log(stage,"入力を確認しました");
+            if(!submit)
+            {
+                stage="試験入力の消去";
+                await ClearField(target,password,calibration.PasswordTemplate,ct);
+                await ClickField(target,calibration.UserX,calibration.UserY,ct);
+                await ClearField(target,user,calibration.Template,ct);
+                Log(stage,"消去しました（送信なし）");
+                progress.Report("試験入力を確認できました。入力した文字は消去し、ログインは送信していません。");
+                return;
+            }
+            stage="送信";
+            CheckInputFocus(target,ct);
+            Win.Press(0x0D);
+            Log(stage,"送信操作を行いました");
+            progress.Report("ID・パスワードの入力を確認し、ログインを送信しました。認証成功は未確認です。認証結果・追加認証はRiotクライアントで確認してください。");
         }
-        var user=await Focus(target,fields?.User,calibration?.UserX??0,calibration?.UserY??0,false,ct);
-        if(calibration!=null)ValidateCalibration(target,calibration,user,ct);
-        await TypeText(target,user,credentials.Username,ct);
-        var password=await Focus(target,fields?.Password,calibration?.PasswordX??0,calibration?.PasswordY??0,true,ct);
-        // In coordinate mode, recheck the password area after the username changed the page.
-        if(calibration!=null)
-        {
-            var current=Capture(target.Hwnd);
-            if(RelativeBounds(target,password)!=calibration.PasswordBounds||!RegionMatches(calibration.PasswordTemplate!,current,calibration.Width,calibration.Height,calibration.PasswordBounds!))
-                throw new InvalidOperationException("パスワード欄の表示が登録時と異なるため中止しました。空のフォームで再試行してください。");
-        }
-        await TypeText(target,password,credentials.Password,ct);
-        CheckFieldFocus(target,password,true,ct);
-        if(fields!=null)Win.Press(0x0D);
-        else
-        {
-            var submit=FindButton(target,calibration!.SubmitX,calibration.SubmitY,true);
-            if(RelativeBounds(target,submit)!=calibration.SubmitBounds||submit.Current.Name!=calibration.SubmitName||submit.Current.AutomationId!=calibration.SubmitAutomationId)throw UnsafeFocus();
-            CheckFieldFocus(target,password,true,ct);
-            Click(target,calibration.SubmitX,calibration.SubmitY,ct);
-        }
-        progress.Report("ログインを送信しました。認証成功は未確認です。認証結果・追加認証はRiotクライアントで確認してください。");
+        catch(OperationCanceledException){Log(stage,"中止しました");throw;}
+        catch(InvalidOperationException ex){Log(stage,ex.Message);throw new InvalidOperationException($"［{stage}］{ex.Message}",ex);}
+        catch(Exception ex){Log(stage,$"{ex.GetType().Name} 0x{ex.HResult:X8}");throw;}
     }
-    private static bool ValidField(Target target,AutomationElement field,bool? password)
+    private static async Task ClickField(Target target,int x,int y,CancellationToken ct)
     {
-        var info=field.Current;
-        if(info.ControlType!=ControlType.Edit||!info.IsEnabled||info.IsOffscreen||!info.IsKeyboardFocusable||password.HasValue&&info.IsPassword!=password.Value)return false;
-        var bounds=info.BoundingRectangle;
-        if(bounds.IsEmpty||bounds.Width<15||bounds.Height<10||bounds.Left<target.X||bounds.Top<target.Y||bounds.Right>target.X+target.Width||bounds.Bottom>target.Y+target.Height)return false;
-        return BelongsToTarget(target,field);
-    }
-    private static bool BelongsToTarget(Target target,AutomationElement element)
-    {
-        var root=element;
-        for(var i=0;i<64&&root!=null;i++)
-        {
-            if(root.Current.NativeWindowHandle==target.Hwnd.ToInt64())return true;
-            root=TreeWalker.ControlViewWalker.GetParent(root);
-        }
-        return false;
-    }
-    private static AutomationElement FindButton(Target target,int x,int y,bool requireEnabled)
-    {
-        var point=ScreenPoint(target,x,y);
-        var button=AutomationElement.FromPoint(new System.Windows.Point(point.X,point.Y));
-        for(var i=0;i<64&&button!=null;i++)
-        {
-            var info=button.Current;
-            if(info.ControlType==ControlType.Button&&!info.IsOffscreen&&(!requireEnabled||info.IsEnabled)&&BelongsToTarget(target,button)&&info.BoundingRectangle.Contains(new System.Windows.Point(point.X,point.Y)))return button;
-            if(info.NativeWindowHandle==target.Hwnd.ToInt64())break;
-            button=TreeWalker.ControlViewWalker.GetParent(button);
-        }
-        throw new InvalidOperationException("登録位置のログインボタンを確認できません。位置を再登録するか個別コピーで入力してください。");
-    }
-    private static async Task<AutomationElement> Focus(Target target,AutomationElement? field,int x,int y,bool password,CancellationToken ct)
-    {
-        target.Check(ct);CheckModifiers();
-        if(field!=null)
-        {
-            if(!ValidField(target,field,password))throw UnsafeFocus();
-            field.SetFocus();
-        }
-        else Click(target,x,y,ct);
-        await Task.Delay(100,ct);
+        Click(target,x,y,ct);
+        await Task.Delay(200,ct);
         target.Check(ct);
-        var focused=AutomationElement.FocusedElement;
-        if(focused==null||!ValidField(target,focused,password)||field!=null&&!Automation.Compare(focused,field))throw UnsafeFocus();
-        if(field==null&&!focused.Current.BoundingRectangle.Contains(new System.Windows.Point(target.X+x,target.Y+y)))throw UnsafeFocus();
         target.RememberCursor();
-        return focused;
     }
-    private static InvalidOperationException UnsafeFocus()=>new("安全な入力先を確認できないため中止しました。Riotのログイン欄を確認してください。認識できない場合は個別コピーで入力してください。");
-    private static void CheckFieldFocus(Target target,AutomationElement field,bool password,CancellationToken ct)
+    // Click the registered point, then require the field strip to look like the registered blank, focused field.
+    private static async Task<byte[]> FocusField(Target target,int x,int y,InputBounds region,byte[] template,string name,CancellationToken ct)
+    {
+        await ClickField(target,x,y,ct);
+        CheckInputFocus(target,ct);
+        var current=CaptureRegion(target.Hwnd,region);
+        target.Check(ct);
+        if(!LooksBlank(template,current,target.Dpi))
+            throw new InvalidOperationException($"{name}が登録時の空の状態と一致しません。入力を空にし、同じ表示状態で再試行してください。配置が変わった場合は位置を登録し直してください。");
+        return current;
+    }
+    private static async Task ClearField(Target target,InputBounds region,byte[] template,CancellationToken ct)
+    {
+        CheckInputFocus(target,ct);Win.SelectAll();Win.Press(0x08);
+        await Task.Delay(150,ct);
+        CheckInputFocus(target,ct);
+        if(!LooksBlank(template,CaptureRegion(target.Hwnd,region),target.Dpi))
+            throw new InvalidOperationException("試験入力の文字を消去できたか確認できません。入力欄の文字を手動で消してください。");
+    }
+    // Native keyboard focus must sit inside the Riot window, which must still be the foreground, unmoved window,
+    // and the mouse must not have moved since the click.
+    private static void CheckInputFocus(Target target,CancellationToken ct)
     {
         target.Check(ct);CheckModifiers();
         var nativeFocus=new Win.GuiThreadInfo{Size=(uint)Marshal.SizeOf<Win.GuiThreadInfo>()};
         if(!Win.GetGUIThreadInfo(0,ref nativeFocus)||nativeFocus.Focus==IntPtr.Zero||Win.GetAncestor(nativeFocus.Focus,2)!=target.Hwnd)throw UnsafeFocus();
-        var focused=AutomationElement.FocusedElement;
-        if(focused==null||!Automation.Compare(focused,field)||!ValidField(target,field,password)||!field.Current.HasKeyboardFocus)throw UnsafeFocus();
         target.CheckCursor();
     }
-    private static async Task TypeText(Target target,AutomationElement field,string value,CancellationToken ct)
+    private static async Task TypeText(Target target,InputBounds region,byte[] before,string value,CancellationToken ct)
     {
-        var password=field.Current.IsPassword;
-        var bounds=field.Current.BoundingRectangle;
-        CheckFieldFocus(target,field,password,ct);
+        CheckInputFocus(target,ct);
         Win.SelectAll();
         foreach(var c in value)
         {
             await Task.Delay(8,ct); // Pump foreground events and cancellation before every character.
-            CheckFieldFocus(target,field,password,ct);
-            if(field.Current.BoundingRectangle!=bounds)throw UnsafeFocus();
+            CheckInputFocus(target,ct);
             Win.Unicode(c);
         }
-        await Task.Delay(80,ct);
-        CheckFieldFocus(target,field,password,ct);
-        if(!password&&field.TryGetCurrentPattern(ValuePattern.Pattern,out var pattern)&&((ValuePattern)pattern).Current.Value!=value)
-            throw new InvalidOperationException("ログインIDの入力結果を確認できなかったため中止しました。");
+        await Task.Delay(150,ct);
+        CheckInputFocus(target,ct);
+        // Protected fields never expose their content; confirm by the strip's pixels changing instead.
+        if(!TextAppeared(before,CaptureRegion(target.Hwnd,region),value.Length,target.Dpi))
+            throw new InvalidOperationException("入力欄に文字が入ったことを確認できなかったため、ログインは送信していません。入力欄の状態を確認し、必要なら手動で操作するか個別コピーを使ってください。");
     }
+    private static InvalidOperationException UnsafeFocus()=>new("安全な入力先を確認できないため中止しました。Riotのログイン欄を確認してください。認識できない場合は個別コピーで入力してください。");
     public static void Guard(IntPtr hwnd,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -223,15 +241,15 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         if(!Win.GetCursorPos(out var current)||current.X!=verified.X||current.Y!=verified.Y)throw UnsafeFocus();
         Win.Click();
     }
-    public async Task<Calibration> CalibrateAsync(IProgress<string> progress,CancellationToken ct)
+    public async Task<Calibration> CalibrateAsync(IProgress<CalibrationProgress> progress,CancellationToken ct)
     {
         using var process=await OpenClient(ct);var hwnd=process.MainWindowHandle;
         Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(400,ct);
         using var target=new Target(process,hwnd);target.Check(ct);
         var points=new List<Win.Point>();
-        foreach(var label in new[]{"ID欄","パスワード欄","ログインボタン"})
+        foreach(var label in new[]{"ID欄","パスワード欄"})
         {
-            progress.Report($"空のRiotログインフォームの{label}にマウスを置き、F8を押してください。Escで中止します。");
+            progress.Report(new(points.Count+1,label));
             while((Win.GetAsyncKeyState(0x77)&0x8000)!=0){target.Check(ct);await Task.Delay(50,ct);}
             while((Win.GetAsyncKeyState(0x77)&0x8000)==0){target.Check(ct);await Task.Delay(50,ct);}
             target.Check(ct);
@@ -239,88 +257,83 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
             ScreenPoint(target,point.X,point.Y);
             points.Add(point);await Task.Delay(150,ct);
         }
-        if(Math.Abs(points[0].Y-points[1].Y)<15)throw new InvalidOperationException("ID欄とパスワード欄に別の位置を指定してください。");
-        var submit=FindButton(target,points[2].X,points[2].Y,false);
-        var submitBounds=RelativeBounds(target,submit);
-        // Verify semantic focus even if enumeration failed. Custom fields that expose no
-        // focused edit control cannot safely receive stored secrets; use manual copy instead.
-        var user=await Focus(target,null,points[0].X,points[0].Y,false,ct);
-        if(!user.TryGetCurrentPattern(ValuePattern.Pattern,out var value)||!string.IsNullOrEmpty(((ValuePattern)value).Current.Value))
-            throw new InvalidOperationException("ID欄が空であることを確認できません。入力を空にして再登録してください。");
-        var userBounds=RelativeBounds(target,user);
-        var template=Capture(hwnd);
-        var password=await Focus(target,null,points[1].X,points[1].Y,true,ct);
-        var passwordBounds=RelativeBounds(target,password);
-        var passwordTemplate=Capture(hwnd);
-        if(userBounds==passwordBounds||userBounds.Y+userBounds.Height>passwordBounds.Y)
-            throw new InvalidOperationException("入力欄の配置を確認できません。位置を再登録してください。");
-        // Protected controls deliberately do not expose their value. The user confirms
-        // both fields are empty in Settings before starting. Store each focused blank form.
-        var result=new Calibration(target.Width,target.Height,target.Dpi,target.Version,points[0].X,points[0].Y,points[1].X,points[1].Y,points[2].X,points[2].Y,template,2,userBounds,passwordBounds,passwordTemplate,submitBounds,submit.Current.Name,submit.Current.AutomationId);
-        target.Check(ct);store.SetSecret("login-calibration-v2",JsonSerializer.Serialize(result));return result;
-    }
-    private static InputBounds RelativeBounds(Target target,AutomationElement element)
-    {
-        var r=element.Current.BoundingRectangle;
-        return new((int)Math.Floor(r.Left)-target.X,(int)Math.Floor(r.Top)-target.Y,(int)Math.Ceiling(r.Width),(int)Math.Ceiling(r.Height));
+        var user=Strip(target.Width,target.Height,points[0].X,points[0].Y,target.Dpi);
+        var password=Strip(target.Width,target.Height,points[1].X,points[1].Y,target.Dpi);
+        if(!ValidBounds(user,target.Width,target.Height)||!ValidBounds(password,target.Width,target.Height)||Intersects(user,password)||points[0].Y>=points[1].Y)
+            throw new InvalidOperationException("ID欄とパスワード欄の位置を確認できません。ID欄を上、パスワード欄を下にし、それぞれ入力欄の中央にマウスを置いて登録し直してください。");
+        // The user confirmed both fields are empty. Store each field's strip as it looks when blank and focused.
+        await ClickField(target,points[0].X,points[0].Y,ct);CheckInputFocus(target,ct);
+        var template=CaptureRegion(hwnd,user);
+        await ClickField(target,points[1].X,points[1].Y,ct);CheckInputFocus(target,ct);
+        var passwordTemplate=CaptureRegion(hwnd,password);
+        var result=new Calibration(target.Width,target.Height,target.Dpi,target.Version,points[0].X,points[0].Y,points[1].X,points[1].Y,template,passwordTemplate,user,password);
+        target.Check(ct);store.SetSecret(CalibrationKey,JsonSerializer.Serialize(result));
+        Log("位置登録",$"登録しました（画面{target.Width}x{target.Height}・{target.Dpi}dpi）");
+        return result;
     }
     internal static bool CalibrationGeometryMatches(Calibration c,int width,int height,uint dpi,string version)=>
-        c.SchemaVersion==2&&c.PasswordTemplate is{Length:>0}&&c.Template is{Length:>0}&&c.Width==width&&c.Height==height&&c.Dpi==dpi&&c.ClientVersion==version&&!string.IsNullOrWhiteSpace(version)&&width>0&&height>0&&dpi>0&&
-        ValidBounds(c.UserBounds,width,height)&&ValidBounds(c.PasswordBounds,width,height)&&ValidBounds(c.SubmitBounds,width,height)&&
-        Contains(c.UserBounds!,c.UserX,c.UserY)&&Contains(c.PasswordBounds!,c.PasswordX,c.PasswordY)&&Contains(c.SubmitBounds!,c.SubmitX,c.SubmitY)&&c.SubmitX>=0&&c.SubmitY>=0&&c.SubmitX<width&&c.SubmitY<height;
+        c.SchemaVersion==3&&c.PasswordTemplate is{Length:>0}&&c.Template is{Length:>0}&&c.Width==width&&c.Height==height&&c.Dpi==dpi&&c.ClientVersion==version&&!string.IsNullOrWhiteSpace(version)&&width>0&&height>0&&dpi>0&&
+        ValidBounds(c.UserBounds,width,height)&&ValidBounds(c.PasswordBounds,width,height)&&!Intersects(c.UserBounds!,c.PasswordBounds!)&&
+        Contains(c.UserBounds!,c.UserX,c.UserY)&&Contains(c.PasswordBounds!,c.PasswordX,c.PasswordY)&&c.UserY<c.PasswordY;
     private static bool ValidBounds(InputBounds? b,int width,int height)=>b!=null&&b.Width>=15&&b.Height>=10&&b.X>=0&&b.Y>=0&&(long)b.X+b.Width<=width&&(long)b.Y+b.Height<=height;
     private static bool Contains(InputBounds b,int x,int y)=>x>=b.X&&y>=b.Y&&x<(long)b.X+b.Width&&y<(long)b.Y+b.Height;
+    private static bool Intersects(InputBounds a,InputBounds b)=>a.X<(long)b.X+b.Width&&b.X<(long)a.X+a.Width&&a.Y<(long)b.Y+b.Height&&b.Y<(long)a.Y+a.Height;
     private static void ValidateCalibrationGeometry(Target target,Calibration calibration,CancellationToken ct)
     {
         target.Check(ct);
         if(!CalibrationGeometryMatches(calibration,target.Width,target.Height,target.Dpi,target.Version))
             throw new InvalidOperationException("Riot画面の構成・サイズ・表示倍率・バージョンが変わりました。ログイン位置を再登録してください。");
-        ScreenPoint(target,calibration.UserX,calibration.UserY);ScreenPoint(target,calibration.PasswordX,calibration.PasswordY);ScreenPoint(target,calibration.SubmitX,calibration.SubmitY);
+        ScreenPoint(target,calibration.UserX,calibration.UserY);ScreenPoint(target,calibration.PasswordX,calibration.PasswordY);
     }
-    private static void ValidateCalibration(Target target,Calibration calibration,AutomationElement user,CancellationToken ct)
+    // A strip about one field wide and half a field tall around the registered point (scaled by DPI): it covers where typed text
+    // and password dots appear, and stays inside the field so focus rings and neighbouring animation do not matter.
+    private static InputBounds Strip(int width,int height,int x,int y,uint dpi)
     {
-        ValidateCalibrationGeometry(target,calibration,ct);
-        if(RelativeBounds(target,user)!=calibration.UserBounds||!user.TryGetCurrentPattern(ValuePattern.Pattern,out var value)||!string.IsNullOrEmpty(((ValuePattern)value).Current.Value))
-            throw new InvalidOperationException("空のID欄と登録位置を確認できません。入力を空にして再試行してください。");
-        var current=Capture(target.Hwnd);target.Check(ct);
-        if(!RegionMatches(calibration.Template,current,calibration.Width,calibration.Height,calibration.UserBounds!)||!RegionMatches(calibration.Template,current,calibration.Width,calibration.Height,calibration.PasswordBounds!))
-            throw new InvalidOperationException("登録した空のログイン画面と一致しません。ID・パスワード欄を空にし、同じ表示状態で再試行してください。配置が変わった場合は再登録してください。");
+        var scale=Math.Clamp(dpi/96.0,1.0,4.0);
+        var halfWidth=(int)(170*scale);var halfHeight=(int)(14*scale);
+        var left=Math.Max(0,x-halfWidth);var top=Math.Max(0,y-halfHeight);
+        return new(left,top,Math.Min(width,x+halfWidth)-left,Math.Min(height,y+halfHeight)-top);
     }
-    internal static byte[] Capture(IntPtr hwnd)
+    internal static byte[] CaptureRegion(IntPtr hwnd,InputBounds region)
     {
-        if(!Win.GetClientRect(hwnd,out var rect)||rect.Right<=0||rect.Bottom<=0||rect.Right>8192||rect.Bottom>8192)throw UnsafeFocus();
+        if(!Win.GetClientRect(hwnd,out var rect)||!ValidBounds(region,rect.Right,rect.Bottom))throw UnsafeFocus();
         var origin=new Win.Point();if(!Win.ClientToScreen(hwnd,ref origin))throw UnsafeFocus();
-        using var bitmap=new Bitmap(rect.Right,rect.Bottom,PixelFormat.Format24bppRgb);
-        using(var graphics=Graphics.FromImage(bitmap))graphics.CopyFromScreen(origin.X,origin.Y,0,0,bitmap.Size);
+        using var bitmap=new Bitmap(region.Width,region.Height,PixelFormat.Format24bppRgb);
+        using(var graphics=Graphics.FromImage(bitmap))graphics.CopyFromScreen(origin.X+region.X,origin.Y+region.Y,0,0,bitmap.Size);
         using var memory=new MemoryStream();bitmap.Save(memory,ImageFormat.Png);return memory.ToArray();
     }
-    internal static bool TemplatesMatch(byte[] expected,byte[] actual,int width,int height,int ux,int uy,int px,int py)=>
-        RegionMatches(expected,actual,width,height,Strip(width,height,ux,uy))&&RegionMatches(expected,actual,width,height,Strip(width,height,px,py));
-    private static InputBounds Strip(int width,int height,int x,int y)
+    // Number of pixel columns that differ noticeably between two same-size strips; -1 if they cannot be compared.
+    internal static int ChangedColumns(byte[] first,byte[] second)
     {
-        var left=Math.Max(0,x-130);var top=Math.Max(0,y-24);
-        return new(left,top,Math.Min(width,x+130)-left,Math.Min(height,y+24)-top);
-    }
-    private static bool RegionMatches(byte[] expected,byte[] actual,int width,int height,InputBounds region)
-    {
-        if(expected==null||actual==null||!ValidBounds(region,width,height))return false;
+        if(first==null||second==null)return -1;
         try
         {
-            using var aStream=new MemoryStream(expected);using var bStream=new MemoryStream(actual);
+            using var aStream=new MemoryStream(first);using var bStream=new MemoryStream(second);
             using var a=new Bitmap(aStream);using var b=new Bitmap(bStream);
-            if(a.Width!=width||b.Width!=width||a.Height!=height||b.Height!=height)return false;
-            // No averaged pixel threshold: even one entered character must invalidate the
-            // blank template. Caret/hover changes may require a retry; fail closed.
-            for(var y=region.Y;y<region.Y+region.Height;y++)
-                for(var x=region.X;x<region.X+region.Width;x++)
+            if(a.Width!=b.Width||a.Height!=b.Height)return -1;
+            var columns=0;
+            for(var x=0;x<a.Width;x++)
+                for(var y=0;y<a.Height;y++)
                 {
                     var c=a.GetPixel(x,y);var d=b.GetPixel(x,y);
-                    if(Math.Abs(c.R-d.R)>2||Math.Abs(c.G-d.G)>2||Math.Abs(c.B-d.B)>2)return false;
+                    if(Math.Abs(c.R-d.R)>24||Math.Abs(c.G-d.G)>24||Math.Abs(c.B-d.B)>24){columns++;break;}
                 }
-            return true;
+            return columns;
         }
-        catch(ArgumentException){return false;}
-        catch(ExternalException){return false;}
+        catch(ArgumentException){return -1;}
+        catch(ExternalException){return -1;}
+    }
+    // Blank = at most a blinking caret's worth of columns changed. One typed character changes more, so leftover text is refused.
+    internal static bool LooksBlank(byte[] template,byte[] current,uint dpi)
+    {
+        var changed=ChangedColumns(template,current);
+        return changed>=0&&changed<=(int)Math.Ceiling(3*Math.Clamp(dpi/96.0,1.0,4.0));
+    }
+    internal static bool TextAppeared(byte[] before,byte[] after,int length,uint dpi)
+    {
+        if(length<=0)return false;
+        var changed=ChangedColumns(before,after);
+        return changed>=(int)Math.Ceiling((4+Math.Min(length,8))*Math.Clamp(dpi/96.0,1.0,4.0));
     }
     private sealed class Target:IDisposable
     {
