@@ -44,7 +44,14 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog
                     continue;
                 }
                 if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                    throw new RiotApiException("APIキーが無効・失効、またはアクセスが許可されていません。設定でキーを確認してください。", response.StatusCode);
+                {
+                    var reason = await ReadStatusMessage(response, ct);
+                    log?.Write("Riot API", $"{host} {ApiRoute.Redact(path)} 拒否理由: {(reason.Length == 0 ? "（応答に説明なし）" : reason)}");
+                    var shown = reason.Length == 0 ? "" : $"（Riotの応答: {reason}）";
+                    throw new RiotApiException(response.StatusCode == HttpStatusCode.Unauthorized
+                        ? $"APIキーがRiotに認識されません{shown}。貼り付けの欠け・余分な文字・別の値の可能性があります。Developer Portalの「Development API Key」を貼り直してください。"
+                        : $"APIキーが失効しているか、このAPIへのアクセスが許可されていません{shown}。開発用キーは24時間で失効します。Developer Portalで再生成して貼り直してください。", response.StatusCode);
+                }
                 if (response.StatusCode == HttpStatusCode.NotFound)
                     throw new RiotApiException("対象データが見つかりません。Riot ID・タグ・サーバーを確認してください。", response.StatusCode);
                 if (!response.IsSuccessStatusCode)
@@ -56,6 +63,18 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog
         }
         catch (JsonException) { throw new RiotApiException("Riot APIの応答を読み取れませんでした。保存済みデータを表示しています。"); }
         finally { gate.Release(); }
+    }
+
+    // Riot's error body is {"status":{"message":"...","status_code":...}}; the message never echoes the key.
+    private static async Task<string> ReadStatusMessage(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var message = json.RootElement.GetProperty("status").GetProperty("message").GetString() ?? "";
+            return message.Length > 100 ? message[..100] : message;
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return ""; }
     }
 
     private async Task<HttpResponseMessage> Send(HttpRequestMessage request, string host, string route, CancellationToken ct)

@@ -146,12 +146,25 @@ public sealed class SettingsDialog : Window
         form.Children.Add(DialogLayout.Hint("OP.GGは非公式の取得方法です。仕様変更で突然使えなくなることがあり、OP.GG側の更新が遅れると最新の試合が含まれません。参考ランク帯はRiot API利用時のみ算出します。"));
         form.Children.Add(DialogLayout.Hint($"保存先：{folder}\n暗号化データは別のWindowsユーザーでは復号できません。"));
         var error = DialogLayout.Hint(""); error.Foreground = System.Windows.Media.Brushes.Firebrick; form.Children.Add(error);
+        var warned = false;
+        key.PasswordChanged += (_, _) => warned = false;
         bool Save()
         {
             try
             {
                 if (clearKey.IsChecked == true) store.SetSecret("riot-api-key", "");
-                else if (!string.IsNullOrWhiteSpace(key.Password)) store.SetSecret("riot-api-key", key.Password.Trim());
+                else if (!string.IsNullOrWhiteSpace(key.Password))
+                {
+                    // An odd-looking key is saved only on the second press, so a bad paste is noticed before it is stored.
+                    var problems = RiotKeyFormat.Problems(key.Password.Trim());
+                    if (problems.Count > 0 && !warned)
+                    {
+                        warned = true;
+                        error.Text = "APIキーの形式が通常と異なります：" + string.Join("／", problems) + "。貼り付けをやり直すか、このまま保存する場合はもう一度「保存」を押してください。";
+                        return false;
+                    }
+                    store.SetSecret("riot-api-key", key.Password.Trim());
+                }
                 store.Write("setting", "statsSource", source.SelectedValue as string == "opgg" ? "opgg" : "riot");
                 key.Clear(); return true;
             }

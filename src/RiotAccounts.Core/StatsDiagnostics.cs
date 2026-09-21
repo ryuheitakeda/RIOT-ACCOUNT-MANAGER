@@ -5,6 +5,24 @@ using System.Text.Json;
 
 namespace RiotAccounts.Core;
 
+/// <summary>Checks the shape of a Riot API key without revealing it. A mismatch is a hint, not proof: Riot may change the format.</summary>
+public static class RiotKeyFormat
+{
+    private static readonly System.Text.RegularExpressions.Regex Expected = new("^RGAPI-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+
+    public static IReadOnlyList<string> Problems(string key)
+    {
+        var problems = new List<string>();
+        if (key.Any(char.IsWhiteSpace)) problems.Add("空白・改行を含んでいます");
+        if (key.Any(c => c > '~' || char.IsControl(c))) problems.Add("全角文字や見えない文字を含んでいます");
+        if (key.Any(c => c is '"' or '\'' or '`')) problems.Add("引用符を含んでいます");
+        if (!key.StartsWith("RGAPI-", StringComparison.Ordinal)) problems.Add("「RGAPI-」で始まっていません");
+        if (key.Length != 42) problems.Add($"長さが{key.Length}文字です（通常は42文字）");
+        if (problems.Count == 0 && !Expected.IsMatch(key)) problems.Add("形式が通常（RGAPI-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）と異なります");
+        return problems;
+    }
+}
+
 public sealed record DiagnosticStep(string Name, bool Ok, string Detail, long Milliseconds);
 
 public sealed record DiagnosticReport(string Source, string Account, IReadOnlyList<DiagnosticStep> Steps, IReadOnlyList<string> Skipped)
@@ -40,8 +58,12 @@ public sealed class StatsDiagnostics(RiotApi riot, OpggApi opgg, Func<string?> g
         [
             new("APIキー", () =>
             {
-                if (string.IsNullOrWhiteSpace(getRiotKey())) throw new RiotApiException("Riot APIキーが未登録です。設定で登録してください。");
-                return Task.FromResult("登録済み（値は表示しません）。開発用キーは24時間で失効します。");
+                var key = getRiotKey();
+                if (string.IsNullOrWhiteSpace(key)) throw new RiotApiException("Riot APIキーが未登録です。設定で登録してください。");
+                var problems = RiotKeyFormat.Problems(key);
+                return Task.FromResult(problems.Count == 0
+                    ? "登録済み・形式は正常（値は表示しません）。開発用キーは24時間で失効します。"
+                    : "登録済みですが形式に注意：" + string.Join("／", problems) + "。貼り付けをやり直してください（値は表示しません）。");
             }),
             new("Riot IDの解決", async () =>
             {

@@ -53,6 +53,36 @@ public sealed class StatsDiagnosticsTests : IDisposable
         Assert.DoesNotContain("SECRET", text);
     }
 
+    [Theory]
+    [InlineData("RGAPI-0123abcd-0123-4567-89ab-0123456789ab", 0)]
+    [InlineData("  RGAPI-0123abcd-0123-4567-89ab-0123456789ab", 1)]
+    [InlineData("RGAPI-0123abcd-0123-4567-89ab-0123456789a", 1)]
+    [InlineData("0123abcd-0123-4567-89ab-0123456789ab", 2)]
+    [InlineData("\"RGAPI-0123abcd-0123-4567-89ab-0123456789ab\"", 2)]
+    public void KeyFormat_FlagsOddKeys(string key, int minimumProblems)
+    {
+        var problems = RiotKeyFormat.Problems(key);
+        Assert.Equal(minimumProblems == 0, problems.Count == 0);
+        Assert.True(problems.Count >= minimumProblems);
+    }
+
+    [Fact]
+    public async Task Riot_UnauthorizedIsDistinguishedFromForbiddenAndShowsRiotReason()
+    {
+        var log = new DiagnosticLog(LogPath);
+        HttpResponseMessage Denied(HttpStatusCode code, string message) => new(code) { Content = new StringContent("{\"status\":{\"message\":\"" + message + "\",\"status_code\":" + (int)code + "}}") };
+        using var unauthorized = new RiotApi(new HttpClient(new Routes(_ => Denied(HttpStatusCode.Unauthorized, "Unknown apikey"))), () => "RGAPI-secret-value", log);
+        var first = await Assert.ThrowsAsync<RiotApiException>(() => unauthorized.GetAsync<List<string>>("asia", "/riot/account/v1/x", CancellationToken.None));
+        Assert.Contains("認識されません", first.Message);
+        Assert.Contains("Unknown apikey", first.Message);
+        using var forbidden = new RiotApi(new HttpClient(new Routes(_ => Denied(HttpStatusCode.Forbidden, "Forbidden"))), () => "RGAPI-secret-value", log);
+        var second = await Assert.ThrowsAsync<RiotApiException>(() => forbidden.GetAsync<List<string>>("asia", "/riot/account/v1/x", CancellationToken.None));
+        Assert.Contains("失効", second.Message);
+        var text = File.ReadAllText(LogPath);
+        Assert.Contains("拒否理由: Unknown apikey", text);
+        Assert.DoesNotContain("secret-value", text);
+    }
+
     [Fact]
     public async Task Riot_AllStagesPass()
     {
