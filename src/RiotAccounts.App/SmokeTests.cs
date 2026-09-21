@@ -173,6 +173,8 @@ internal static class SmokeTests
             Construct(() => new MainWindow(store, directory), "self-test-sample.png");
             Construct(() => new AccountDialog(store, account));
             Construct(() => new SettingsDialog(store, null, directory));
+            Construct(() => new DiagnosticsDialog(new DiagnosticReport("Riot API（公式）", "ダミー（Dummy#JP1）",
+                [new("APIキー", true, "登録済み", 1), new("Riot IDの解決", false, "HTTP 403: ダミー", 2)], ["ランク取得"]), Path.Combine(directory, "diagnostics.log")), "self-test-diagnostics.png");
         }
         finally { application.ShutdownMode = shutdownMode; }
 

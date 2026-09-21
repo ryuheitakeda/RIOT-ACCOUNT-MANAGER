@@ -18,7 +18,12 @@ public partial class MainWindow:Window
     private readonly LolStatsProvider riotProvider;
     private readonly OpggApi opggApi;
     private readonly OpggStatsProvider opggProvider;
-    private IGameStatsProvider Provider=>store.Read<string>("setting","statsSource")=="opgg"?opggProvider:riotProvider;
+    private readonly DiagnosticLog log;
+    private readonly StatsDiagnostics diagnostics;
+    private readonly IGameStatsProvider riotLogged;
+    private readonly IGameStatsProvider opggLogged;
+    private bool UsingOpgg=>store.Read<string>("setting","statsSource")=="opgg";
+    private IGameStatsProvider Provider=>UsingOpgg?opggLogged:riotLogged;
     private readonly NativeLogin login;
     private CancellationTokenSource? operation;
     private bool initialized;
@@ -27,7 +32,10 @@ public partial class MainWindow:Window
     public MainWindow(Store store,string folder)
     {
         this.store=store;this.folder=folder;
-        api=new(http,()=>store.GetSecret("riot-api-key"));riotProvider=new(store,api);opggApi=new(http);opggProvider=new(store,opggApi);login=new(store,new DiagnosticLog(Path.Combine(folder,"logs","diagnostics.log")));
+        log=new(Path.Combine(folder,"logs","diagnostics.log"));
+        api=new(http,()=>store.GetSecret("riot-api-key"),log);riotProvider=new(store,api);opggApi=new(http,null,log);opggProvider=new(store,opggApi);login=new(store,log);
+        riotLogged=new LoggedStatsProvider(riotProvider,"Riot API",log);opggLogged=new LoggedStatsProvider(opggProvider,"OP.GG",log);
+        diagnostics=new(api,opggApi,()=>store.GetSecret("riot-api-key"),log);
         InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
         Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
@@ -42,7 +50,8 @@ public partial class MainWindow:Window
     {
         if(!initialized)return;
         var a=Selected;EmptyPanel.Visibility=a==null?Visibility.Visible:Visibility.Collapsed;DetailPanel.Visibility=a==null?Visibility.Collapsed:Visibility.Visible;if(a==null)return;
-        AccountTitle.Text=a.Label;AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}";
+        AccountTitle.Text=a.Label;var seen=store.Cache(a.Id);var last=new[]{seen.Ranks.LastOrDefault()?.ObservedAt,seen.MatchesUpdatedAt}.Max();
+        AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {(UsingOpgg?"OP.GG（非公式）":"Riot API")}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
         var ranked=Queues.Get(Queue).IsRanked;
         if(!ranked&&HistoryTab.IsSelected)DetailTabs.SelectedItem=OverviewTab;
         RankedSummaryPanel.Visibility=ForecastPanel.Visibility=HistoryTab.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
@@ -95,6 +104,24 @@ public partial class MainWindow:Window
             return $"{p.At.LocalDateTime:yyyy/MM/dd HH:mm}   {p.Rank?.Display??"UNRANKED"}{change}";
         }).Reverse().ToList();
     }
+    // Never switches the source by itself; only points at the diagnosis and the other source.
+    private string SourceHint(Exception ex)
+    {
+        if(ex is not RiotApiException{StatusCode:not System.Net.HttpStatusCode.NotFound})return "";
+        var other=UsingOpgg?"Riot API":"OP.GG";
+        return $" 「接続を診断」で失敗した段階を確認できます。設定で取得元を{other}に切り替えることもできます。";
+    }
+    private async void Diagnose_Click(object sender,RoutedEventArgs e)
+    {
+        if(Selected is not{} a){StatusText.Text="診断するアカウントを選んでください。";return;}
+        var source=UsingOpgg?"opgg":"riot";
+        await Run(async(progress,ct)=>
+        {
+            var report=await diagnostics.RunAsync(a,source,progress,ct);
+            progress.Report(report.Ok?"接続を診断しました。すべての段階に成功しました。":$"接続を診断しました。「{report.Failed!.Name}」で失敗しました。");
+            new DiagnosticsDialog(report,log.FilePath){Owner=this}.ShowDialog();
+        });
+    }
     private async Task Run(Func<IProgress<string>,CancellationToken,Task> action)
     {
         if(operation!=null){StatusText.Text="処理中です。終了するか「中止」を押してください。";return;}
@@ -107,7 +134,7 @@ public partial class MainWindow:Window
         catch(Microsoft.Data.Sqlite.SqliteException){StatusText.Text="データを保存できません。保存先の空き容量・アクセス権を確認してください。";}
         catch(System.Text.Json.JsonException){StatusText.Text="受信データまたは設定ファイルを読み取れません。設定を確認して再試行してください。";}
         catch(Exception ex) when(ex is RiotApiException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception or System.Windows.Automation.ElementNotAvailableException or ExternalException)
-        {StatusText.Text=ex is RiotApiException or InvalidOperationException?ex.Message:"操作に失敗しました。入力内容・Windows権限を確認してください。";}
+        {StatusText.Text=ex is RiotApiException or InvalidOperationException?ex.Message+SourceHint(ex):"操作に失敗しました。入力内容・Windows権限を確認してください。";}
         finally{status.Active=false;operation.Dispose();operation=null;CancelButton.Visibility=Visibility.Collapsed;Reload();}
     }
     // Progress<T> posts asynchronously, so a report queued just before a synchronous failure
@@ -180,7 +207,7 @@ public partial class MainWindow:Window
             string? clientPath;
             try{clientPath=login.ClientPath();}catch(Exception ex) when(ex is System.Text.Json.JsonException or IOException){clientPath=null;}
             var dialog=new SettingsDialog(store,clientPath,folder){Owner=this};
-            dialog.ShowDialog();
+            dialog.ShowDialog();Render();
             if(dialog.SetupRequested)
             {
                 var setup=new LoginSetupDialog(store,login,clientPath){Owner=this};

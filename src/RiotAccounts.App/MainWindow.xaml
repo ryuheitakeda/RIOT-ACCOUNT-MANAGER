@@ -3,7 +3,7 @@
  <Grid Margin="26">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <DockPanel Margin="0,0,0,22">
-   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"><Button Content="全ランク更新" Click="RefreshAll_Click"/><Button Content="設定" Click="Settings_Click"/></StackPanel>
+   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"><Button Content="全ランク更新" Click="RefreshAll_Click"/><Button Content="接続を診断" Click="Diagnose_Click"/><Button Content="設定" Click="Settings_Click"/></StackPanel>
    <StackPanel><TextBlock Text="Riot Accounts" FontSize="29" FontWeight="SemiBold"/><TextBlock Text="アカウントを選んで、次の一戦へ。" Foreground="#597183" Margin="0,4,0,0"/></StackPanel>
   </DockPanel>
   <Grid Grid.Row="1">

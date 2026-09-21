@@ -8,7 +8,7 @@ public sealed class RiotApiException(string message, HttpStatusCode? statusCode 
     public HttpStatusCode? StatusCode { get; } = statusCode;
 }
 
-public sealed class RiotApi(HttpClient http, Func<string?> getKey) : IDisposable
+public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog? log = null) : IDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Queue<DateTimeOffset> requests = [];
@@ -28,12 +28,12 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey) : IDisposable
             for (var attempt = 0; attempt < 4; attempt++)
             {
                 var key = getKey();
-                if (string.IsNullOrWhiteSpace(key)) throw new RiotApiException("設定でRiot APIキーを登録してください。");
+                if (string.IsNullOrWhiteSpace(key)) { log?.Write("Riot API", "APIキーが未登録です"); throw new RiotApiException("設定でRiot APIキーを登録してください。"); }
                 await WaitForRateLimit(ct, progress);
                 using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"https://{host}.api.riotgames.com{path}"));
                 request.Headers.Add("X-Riot-Token", key);
                 requests.Enqueue(DateTimeOffset.UtcNow);
-                using var response = await http.SendAsync(request, ct);
+                using var response = await Send(request, host, ApiRoute.Redact(path), ct);
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
                     var wait = response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow) ?? TimeSpan.FromSeconds(120);
@@ -56,6 +56,22 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey) : IDisposable
         }
         catch (JsonException) { throw new RiotApiException("Riot APIの応答を読み取れませんでした。保存済みデータを表示しています。"); }
         finally { gate.Release(); }
+    }
+
+    private async Task<HttpResponseMessage> Send(HttpRequestMessage request, string host, string route, CancellationToken ct)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var response = await http.SendAsync(request, ct);
+            log?.Write("Riot API", $"{host} {route} -> HTTP {(int)response.StatusCode} ({timer.ElapsedMilliseconds}ms)");
+            return response;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+        {
+            log?.Write("Riot API", $"{host} {route} -> {(ct.IsCancellationRequested ? "中止" : "通信失敗 " + ex.GetType().Name)} ({timer.ElapsedMilliseconds}ms)");
+            throw;
+        }
     }
 
     private async Task WaitForRateLimit(CancellationToken ct, IProgress<string>? progress)

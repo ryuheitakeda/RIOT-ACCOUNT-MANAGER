@@ -86,6 +86,37 @@ public sealed class AccountDialog : Window
     }
 }
 
+public sealed class DiagnosticsDialog : Window
+{
+    public DiagnosticsDialog(DiagnosticReport report, string logPath)
+    {
+        var form = DialogLayout.Form(this, "接続の診断", 660);
+        form.Children.Add(new TextBlock
+        {
+            Text = report.Ok ? "すべての段階に成功しました。" : $"「{report.Failed!.Name}」で失敗しました。",
+            FontSize = 20, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 12)
+        });
+        var box = new TextBox
+        {
+            Text = report.ToText(), IsReadOnly = true, TextWrapping = TextWrapping.Wrap, MinHeight = 160, MaxHeight = 380,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, FontFamily = new System.Windows.Media.FontFamily("Consolas, Meiryo")
+        };
+        AutomationProperties.SetName(box, "診断結果");
+        form.Children.Add(box);
+        form.Children.Add(DialogLayout.Hint("APIキー・PUUID・応答の内容は含まれません。更新処理の記録：" + logPath));
+        var copy = new Button { Content = "結果をコピー", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 10) };
+        copy.Click += (_, _) =>
+        {
+            try { Clipboard.SetText(report.ToText()); copy.Content = "コピーしました"; }
+            catch (System.Runtime.InteropServices.ExternalException) { copy.Content = "コピーできませんでした"; }
+        };
+        form.Children.Add(copy);
+        var close = new Button { Content = "閉じる", IsCancel = true, HorizontalAlignment = HorizontalAlignment.Left, Style = (Style)FindResource("Primary") };
+        close.Click += (_, _) => Close();
+        form.Children.Add(close);
+    }
+}
+
 public sealed class SettingsDialog : Window
 {
     public bool SetupRequested { get; private set; }

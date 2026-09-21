@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace RiotAccounts.Core;
 
 // OP.GG's web endpoints are unofficial and undocumented; they can change or be blocked without notice.
-public sealed class OpggApi(HttpClient http, TimeSpan? minimumInterval = null) : IDisposable
+public sealed class OpggApi(HttpClient http, TimeSpan? minimumInterval = null, DiagnosticLog? log = null) : IDisposable
 {
     public const string SummonerHost = "lol-api-summoner.op.gg";
     public const string ChampionHost = "lol-api-champion.op.gg";
@@ -28,7 +28,7 @@ public sealed class OpggApi(HttpClient http, TimeSpan? minimumInterval = null) :
                 if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
                 using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"https://{host}{pathAndQuery}"));
                 request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-                using var response = await http.SendAsync(request, ct);
+                using var response = await Send(request, host, ApiRoute.Redact(pathAndQuery), ct);
                 notBefore = DateTimeOffset.UtcNow + interval;
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
@@ -50,6 +50,22 @@ public sealed class OpggApi(HttpClient http, TimeSpan? minimumInterval = null) :
         }
         catch (JsonException) { throw new RiotApiException("OP.GGの応答を読み取れませんでした。保存済みデータを表示しています。"); }
         finally { gate.Release(); }
+    }
+
+    private async Task<HttpResponseMessage> Send(HttpRequestMessage request, string host, string route, CancellationToken ct)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var response = await http.SendAsync(request, ct);
+            log?.Write("OP.GG", $"{host} {route} -> HTTP {(int)response.StatusCode} ({timer.ElapsedMilliseconds}ms)");
+            return response;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+        {
+            log?.Write("OP.GG", $"{host} {route} -> {(ct.IsCancellationRequested ? "中止" : "通信失敗 " + ex.GetType().Name)} ({timer.ElapsedMilliseconds}ms)");
+            throw;
+        }
     }
 
     public void Dispose() => gate.Dispose();
