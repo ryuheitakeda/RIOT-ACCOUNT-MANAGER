@@ -515,6 +515,27 @@ internal static class SmokeTests
         Require(!NativeLogin.TemplatesMatch(blank, changed, 500, 300, 150, 90, 150, 190));
         Require(!NativeLogin.TemplatesMatch(blank, onePixel, 500, 300, 150, 90, 150, 190));
         Require(!NativeLogin.TemplatesMatch(blank, blank, 501, 300, 150, 90, 150, 190));
+        // Typed-text detection: a caret-sized change is not text; a run of dots is; size mismatch fails closed.
+        var field = new InputBounds(40, 80, 200, 30);
+        Require(NativeLogin.TextAppeared(blank, Shape(48, 60, 12), 500, 300, field, 4));
+        Require(NativeLogin.TextAppeared(blank, Shape(48, 6, 6), 500, 300, field, 1));
+        Require(!NativeLogin.TextAppeared(blank, Shape(48, 2, 16), 500, 300, field, 4));
+        Require(!NativeLogin.TextAppeared(blank, blank, 500, 300, field, 4));
+        Require(!NativeLogin.TextAppeared(blank, Shape(48, 60, 12), 501, 300, field, 4));
+        Require(!NativeLogin.TextAppeared(blank, Shape(300, 60, 12), 500, 300, field, 4));
+
+        static byte[] Shape(int x, int width, int height)
+        {
+            using var bitmap = new System.Drawing.Bitmap(500, 300);
+            using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(System.Drawing.Color.White);
+                graphics.FillRectangle(System.Drawing.Brushes.Black, x, 86, width, height);
+            }
+            using var stream = new MemoryStream();
+            bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+            return stream.ToArray();
+        }
 
         static byte[] MakeImage(bool changed, bool onePixel = false)
         {

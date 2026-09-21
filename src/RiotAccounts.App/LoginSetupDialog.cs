@@ -101,8 +101,9 @@ public sealed class LoginSetupDialog : Window
             if (empty.IsChecked != true) { message.Text = "Riotのログイン画面でID・パスワード欄を空にして、確認欄にチェックしてください。"; return; }
             Start(async ct =>
             {
-                if (await login.CheckFieldsAsync(ct)) ShowComplete(false);
-                else ShowRegistration();
+                var check = await login.CheckFieldsAsync(ct);
+                if (check.Found) ShowComplete(false);
+                else ShowRegistration($"入力欄を自動で見つけられませんでした（{check.Detail}）。位置を指定して確認できます。");
             });
         }, true);
         Button("戻る：クライアントの場所", () => ShowClient(login.ClientPath()));
@@ -142,6 +143,12 @@ public sealed class LoginSetupDialog : Window
         }, true);
         Button("戻って入力欄を再確認", () => ShowPreparation());
         Button("個別コピーを使う", ShowCopyHelp);
+        LogHint();
+    }
+
+    private void LogHint()
+    {
+        if (login.LogPath is { } path) actions.Children.Add(DialogLayout.Hint("診断ログ: " + path));
     }
 
     private void ShowCopyHelp()
@@ -156,11 +163,30 @@ public sealed class LoginSetupDialog : Window
         Page("設定の確認が完了しました", registered
             ? "ログイン位置を登録しました。画面サイズ・表示倍率・クライアントの更新で配置が変わった場合は、この案内から再登録してください。"
             : "入力欄を確認できました。位置登録は不要です。");
-        actions.Children.Add(DialogLayout.Hint("アカウントを選んで「Riotにログイン」を押すと利用できます。今回の確認ではID・パスワードの入力やログイン送信はしていません。"));
+        actions.Children.Add(DialogLayout.Hint("入力欄の検出だけでは、実際に文字が入るかは分かりません。試験入力で確認できます（ダミー文字を入力して消去します。ID・パスワードの入力やログイン送信はしません）。"));
+        Button("試験入力を確認する", RunInputTest);
         Button("アカウント画面へ戻る", Close, true);
     }
 
-    private async void Start(Func<CancellationToken, Task> action, bool activateAfter = true, bool registration = false)
+    private void RunInputTest() => Start(async ct =>
+    {
+        var progress = new Progress<string>(text => message.Text = text);
+        await login.TestInputAsync(progress, ct);
+        Completed = true;
+        Page("試験入力を確認できました", "ダミー文字が入力欄に入ることを確認し、消去しました。ログインは送信していません。アカウントを選んで「Riotにログイン」を押すと利用できます。");
+        Button("アカウント画面へ戻る", Close, true);
+    }, failed: ShowTestFailed);
+
+    private void ShowTestFailed(string reason)
+    {
+        Page("試験入力を確認できませんでした", reason + "\n\nダミー文字が入力欄に残っている場合は、手動で消してください。");
+        Button("試験入力をやり直す", RunInputTest);
+        Button("入力位置を登録する", () => ShowRegistration());
+        Button("個別コピーを使う", ShowCopyHelp);
+        LogHint();
+    }
+
+    private async void Start(Func<CancellationToken, Task> action, bool activateAfter = true, bool registration = false, Action<string>? failed = null)
     {
         if (operation != null) return;
         operation = new CancellationTokenSource();
@@ -168,18 +194,21 @@ public sealed class LoginSetupDialog : Window
         try { await action(operation.Token); }
         catch (OperationCanceledException)
         {
-            if (registration) ShowRegistration("位置登録を中止しました。以前の登録は変更していません。最初からやり直せます。");
+            if (failed != null) failed("試験入力を中止しました。");
+            else if (registration) ShowRegistration("位置登録を中止しました。以前の登録は変更していません。最初からやり直せます。");
             else ShowPreparation("確認を中止しました。準備して再試行できます。");
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception
             or ExternalException or CryptographicException or SqliteException or IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
             var reason = ex is InvalidOperationException ? ex.Message : "操作できませんでした。クライアントの起動状態・Windows権限・保存先を確認してください。";
-            if (registration) ShowRegistration(reason + "\n登録は更新していません。最初からやり直せます。");
+            if (failed != null) failed(reason);
+            else if (registration) ShowRegistration(reason + "\n登録は更新していません。最初からやり直せます。");
             else
             {
                 ShowPreparation(reason);
                 Button("個別コピーを使う", ShowCopyHelp);
+                LogHint();
             }
         }
         finally

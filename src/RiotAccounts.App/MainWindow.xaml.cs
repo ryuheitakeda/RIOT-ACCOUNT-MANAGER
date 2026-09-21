@@ -27,7 +27,7 @@ public partial class MainWindow:Window
     public MainWindow(Store store,string folder)
     {
         this.store=store;this.folder=folder;
-        api=new(http,()=>store.GetSecret("riot-api-key"));riotProvider=new(store,api);opggApi=new(http);opggProvider=new(store,opggApi);login=new(store);
+        api=new(http,()=>store.GetSecret("riot-api-key"));riotProvider=new(store,api);opggApi=new(http);opggProvider=new(store,opggApi);login=new(store,new DiagnosticLog(Path.Combine(folder,"logs","diagnostics.log")));
         InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
         Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};

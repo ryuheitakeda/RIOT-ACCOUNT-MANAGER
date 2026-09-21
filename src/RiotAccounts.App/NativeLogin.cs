@@ -14,8 +14,11 @@ public interface IRiotLoginAutomation
 public sealed record InputBounds(int X,int Y,int Width,int Height);
 public sealed record CalibrationProgress(int Step,string Field);
 public sealed record Calibration(int Width,int Height,uint Dpi,string ClientVersion,int UserX,int UserY,int PasswordX,int PasswordY,int SubmitX,int SubmitY,byte[] Template,int SchemaVersion=0,InputBounds? UserBounds=null,InputBounds? PasswordBounds=null,byte[]? PasswordTemplate=null,InputBounds? SubmitBounds=null,string? SubmitName=null,string? SubmitAutomationId=null);
-public sealed class NativeLogin(Store store):IRiotLoginAutomation
+public sealed record FieldCheck(bool Found,string Detail);
+public sealed class NativeLogin(Store store,DiagnosticLog? log=null):IRiotLoginAutomation
 {
+    public string? LogPath=>log?.FilePath;
+    private void Log(string stage,string message)=>log?.Write(stage,message);
     public string? ClientPath()
     {
         var custom=store.Read<string>("setting","clientPath");
@@ -57,25 +60,36 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
     private async Task<Process> OpenClient(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var found=FindClient();if(found!=null)return found;
+        var found=await Task.Run(FindClient,ct);if(found!=null)return found;
         using var started=Process.Start(new ProcessStartInfo(ClientPath()??throw new InvalidOperationException("Riotクライアントが見つかりません。設定で実行ファイルを選択してください。")){UseShellExecute=true});
-        for(var i=0;i<60;i++){await Task.Delay(500,ct);found=FindClient();if(found!=null)return found;}
+        for(var i=0;i<60;i++){await Task.Delay(500,ct);found=await Task.Run(FindClient,ct);if(found!=null)return found;}
         throw new InvalidOperationException("Riotのログイン画面を開いてから再試行してください。");
     }
-    private static (AutomationElement User,AutomationElement Password)? Detect(Target target)
+    private sealed record Detection((AutomationElement User,AutomationElement Password)? Fields,string Summary);
+    private static Detection Detect(Target target)
     {
         try
         {
             var root=AutomationElement.FromHandle(target.Hwnd);
-            var edits=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit))
-                .Cast<AutomationElement>().Where(e=>ValidField(target,e,null)).ToList();
+            var all=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit)).Cast<AutomationElement>().ToList();
+            var edits=all.Where(e=>ValidField(target,e,null)).ToList();
             var passwords=edits.Where(e=>e.Current.IsPassword).ToList();
             var users=edits.Where(e=>!e.Current.IsPassword).ToList();
-            if(passwords.Count==1&&users.Count==1)return(users[0],passwords[0]);
+            var summary=$"Edit要素{all.Count}個のうち有効{edits.Count}個（ID欄{users.Count}・パスワード欄{passwords.Count}）";
+            return passwords.Count==1&&users.Count==1?new((users[0],passwords[0]),summary):new(null,summary);
         }
-        catch(ElementNotAvailableException){ }
-        catch(System.Runtime.InteropServices.COMException){ }
-        return null;
+        catch(ElementNotAvailableException){return new(null,"UI Automationの要素を取得できませんでした");}
+        catch(System.Runtime.InteropServices.COMException ex){return new(null,$"UI Automationの呼び出しに失敗しました（0x{ex.HResult:X8}）");}
+    }
+    // UI Automation calls into the Riot process can stall; bound the wait so the UI never hangs and Esc/close still work.
+    private async Task<Detection> DetectAsync(Target target,CancellationToken ct)
+    {
+        try{return await Task.Run(()=>Detect(target),ct).WaitAsync(TimeSpan.FromSeconds(15),ct);}
+        catch(TimeoutException)
+        {
+            Log("入力欄検出","15秒以内に終了しませんでした");
+            throw new InvalidOperationException("入力欄の検出が15秒以内に終わらなかったため中止しました。Riotクライアントを再起動して再試行してください。");
+        }
     }
     // Setup inspection never reads credentials, types text, or submits the form.
     public async Task OpenForSetupAsync(CancellationToken ct)
@@ -84,58 +98,98 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         Win.ShowWindow(process.MainWindowHandle,9);
         Win.SetForegroundWindow(process.MainWindowHandle);
     }
-    public async Task<bool> CheckFieldsAsync(CancellationToken ct)
+    public async Task<FieldCheck> CheckFieldsAsync(CancellationToken ct)
     {
-        using var process=await OpenClient(ct);
-        var hwnd=process.MainWindowHandle;
-        Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
-        using var target=new Target(process,hwnd);
-        target.Check(ct);
-        var fields=await Task.Run(()=>Detect(target),ct);
-        target.Check(ct);
-        return fields!=null;
+        try
+        {
+            using var process=await OpenClient(ct);
+            var hwnd=process.MainWindowHandle;
+            Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
+            using var target=new Target(process,hwnd);
+            target.Check(ct);
+            var detection=await DetectAsync(target,ct);
+            target.Check(ct);
+            Log("入力欄確認",(detection.Fields!=null?"検出できました: ":"検出できませんでした: ")+detection.Summary);
+            return new(detection.Fields!=null,detection.Summary);
+        }
+        catch(OperationCanceledException){Log("入力欄確認","中止");throw;}
+        catch(Exception ex){Log("入力欄確認",$"{ex.GetType().Name}: {ex.Message}");throw;}
     }
-    public async Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct)
+    public Task LoginAsync(Credentials credentials,IProgress<string> progress,CancellationToken ct)=>EnterAsync(credentials,true,progress,ct);
+    // Types dummy text with the same code path as login, checks it appeared, then clears it. Never submits the form.
+    public Task TestInputAsync(IProgress<string> progress,CancellationToken ct)=>EnterAsync(new Credentials("test-user","Dummy-Pass-1234"),false,progress,ct);
+    private async Task EnterAsync(Credentials credentials,bool submit,IProgress<string> progress,CancellationToken ct)
     {
         if(string.IsNullOrWhiteSpace(credentials.Username)||string.IsNullOrEmpty(credentials.Password)||credentials.Username.Any(char.IsControl)||credentials.Password.Any(char.IsControl))
             throw new InvalidOperationException("ログインIDとパスワードを確認してください。空欄・制御文字は入力できません。");
-        progress.Report("Riotのログイン画面を確認中… Escで中止できます。入力中はキーボード・マウスを操作しないでください。");
-        using var process=await OpenClient(ct);
-        var hwnd=process.MainWindowHandle;
-        Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
-        using var target=new Target(process,hwnd);
-        target.Check(ct);
-        var fields=await Task.Run(()=>Detect(target),ct);
-        target.Check(ct);
-        var savedCalibration=fields==null?store.GetSecret("login-calibration-v2"):null;
-        var calibration=savedCalibration==null?null:JsonSerializer.Deserialize<Calibration>(savedCalibration);
-        if(fields==null)
+        var stage="クライアント検出";
+        try
         {
-            if(calibration==null)throw new InvalidOperationException("入力欄を検出できません。設定の「自動入力を設定する」を開いてください。");
-            ValidateCalibrationGeometry(target,calibration,ct);
-        }
-        var user=await Focus(target,fields?.User,calibration?.UserX??0,calibration?.UserY??0,false,ct);
-        if(calibration!=null)ValidateCalibration(target,calibration,user,ct);
-        await TypeText(target,user,credentials.Username,ct);
-        var password=await Focus(target,fields?.Password,calibration?.PasswordX??0,calibration?.PasswordY??0,true,ct);
-        // In coordinate mode, recheck the password area after the username changed the page.
-        if(calibration!=null)
-        {
-            var current=Capture(target.Hwnd);
-            if(RelativeBounds(target,password)!=calibration.PasswordBounds||!RegionMatches(calibration.PasswordTemplate!,current,calibration.Width,calibration.Height,calibration.PasswordBounds!))
-                throw new InvalidOperationException("パスワード欄の表示が登録時と異なるため中止しました。空のフォームで再試行してください。");
-        }
-        await TypeText(target,password,credentials.Password,ct);
-        CheckFieldFocus(target,password,true,ct);
-        if(fields!=null)Win.Press(0x0D);
-        else
-        {
-            var submit=FindButton(target,calibration!.SubmitX,calibration.SubmitY,true);
-            if(RelativeBounds(target,submit)!=calibration.SubmitBounds||submit.Current.Name!=calibration.SubmitName||submit.Current.AutomationId!=calibration.SubmitAutomationId)throw UnsafeFocus();
+            progress.Report("Riotのログイン画面を確認中… Escで中止できます。入力中はキーボード・マウスを操作しないでください。");
+            using var process=await OpenClient(ct);
+            var hwnd=process.MainWindowHandle;
+            Win.ShowWindow(hwnd,9);Win.SetForegroundWindow(hwnd);await Task.Delay(600,ct);
+            using var target=new Target(process,hwnd);
+            target.Check(ct);
+            stage="入力欄検出";
+            var detection=await DetectAsync(target,ct);
+            var fields=detection.Fields;
+            target.Check(ct);
+            Log(stage,(submit?"ログイン: ":"試験入力: ")+detection.Summary);
+            var savedCalibration=fields==null?store.GetSecret("login-calibration-v2"):null;
+            var calibration=savedCalibration==null?null:JsonSerializer.Deserialize<Calibration>(savedCalibration);
+            if(fields==null)
+            {
+                if(calibration==null)throw new InvalidOperationException($"入力欄を検出できません（{detection.Summary}）。設定の「自動入力を設定する」を開いてください。");
+                ValidateCalibrationGeometry(target,calibration,ct);
+            }
+            Log(stage,fields!=null?"UI Automationの検出結果を使用":"登録済みの位置を使用");
+            stage="ID欄フォーカス";
+            var user=await Focus(target,fields?.User,calibration?.UserX??0,calibration?.UserY??0,false,ct);
+            if(calibration!=null)ValidateCalibration(target,calibration,user,ct);
+            stage="ID入力";
+            progress.Report("IDを入力中…");
+            await TypeText(target,user,credentials.Username,ct);
+            Log(stage,"入力を確認しました");
+            stage="パスワード欄フォーカス";
+            var password=await Focus(target,fields?.Password,calibration?.PasswordX??0,calibration?.PasswordY??0,true,ct);
+            // In coordinate mode, recheck the password area after the username changed the page.
+            if(calibration!=null)
+            {
+                var current=Capture(target.Hwnd);
+                if(RelativeBounds(target,password)!=calibration.PasswordBounds||!RegionMatches(calibration.PasswordTemplate!,current,calibration.Width,calibration.Height,calibration.PasswordBounds!))
+                    throw new InvalidOperationException("パスワード欄の表示が登録時と異なるため中止しました。空のフォームで再試行してください。");
+            }
+            stage="パスワード入力";
+            progress.Report("パスワードを入力中…");
+            await TypeText(target,password,credentials.Password,ct);
             CheckFieldFocus(target,password,true,ct);
-            Click(target,calibration.SubmitX,calibration.SubmitY,ct);
+            Log(stage,"入力を確認しました");
+            if(!submit)
+            {
+                stage="試験入力の消去";
+                CheckFieldFocus(target,password,true,ct);Win.SelectAll();Win.Press(0x08);
+                var again=await Focus(target,fields?.User,calibration?.UserX??0,calibration?.UserY??0,false,ct);
+                CheckFieldFocus(target,again,false,ct);Win.SelectAll();Win.Press(0x08);
+                Log(stage,"消去しました（送信なし）");
+                progress.Report("試験入力を確認できました。入力した文字は消去し、ログインは送信していません。");
+                return;
+            }
+            stage="送信";
+            if(fields!=null)Win.Press(0x0D);
+            else
+            {
+                var submitButton=FindButton(target,calibration!.SubmitX,calibration.SubmitY,true);
+                if(RelativeBounds(target,submitButton)!=calibration.SubmitBounds||submitButton.Current.Name!=calibration.SubmitName||submitButton.Current.AutomationId!=calibration.SubmitAutomationId)throw UnsafeFocus();
+                CheckFieldFocus(target,password,true,ct);
+                Click(target,calibration.SubmitX,calibration.SubmitY,ct);
+            }
+            Log(stage,"送信操作を行いました");
+            progress.Report("ID・パスワードの入力を確認し、ログインを送信しました。認証成功は未確認です。認証結果・追加認証はRiotクライアントで確認してください。");
         }
-        progress.Report("ログインを送信しました。認証成功は未確認です。認証結果・追加認証はRiotクライアントで確認してください。");
+        catch(OperationCanceledException){Log(stage,"中止しました");throw;}
+        catch(InvalidOperationException ex){Log(stage,ex.Message);throw new InvalidOperationException($"［{stage}］{ex.Message}",ex);}
+        catch(Exception ex){Log(stage,$"{ex.GetType().Name} 0x{ex.HResult:X8}");throw;}
     }
     private static bool ValidField(Target target,AutomationElement field,bool? password)
     {
@@ -199,6 +253,9 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
     {
         var password=field.Current.IsPassword;
         var bounds=field.Current.BoundingRectangle;
+        var region=RelativeBounds(target,field);
+        CheckFieldFocus(target,field,password,ct);
+        var before=Capture(target.Hwnd);
         CheckFieldFocus(target,field,password,ct);
         Win.SelectAll();
         foreach(var c in value)
@@ -210,8 +267,35 @@ public sealed class NativeLogin(Store store):IRiotLoginAutomation
         }
         await Task.Delay(80,ct);
         CheckFieldFocus(target,field,password,ct);
-        if(!password&&field.TryGetCurrentPattern(ValuePattern.Pattern,out var pattern)&&((ValuePattern)pattern).Current.Value!=value)
-            throw new InvalidOperationException("ログインIDの入力結果を確認できなかったため中止しました。");
+        if(!password&&field.TryGetCurrentPattern(ValuePattern.Pattern,out var pattern))
+        {
+            if(((ValuePattern)pattern).Current.Value!=value)throw new InvalidOperationException("ログインIDの入力結果を確認できなかったため中止しました。");
+            return;
+        }
+        // Protected or non-value fields never expose their content; confirm by the field's pixels changing instead.
+        if(!TextAppeared(before,Capture(target.Hwnd),target.Width,target.Height,region,value.Length))
+            throw new InvalidOperationException("入力欄に文字が入ったことを確認できなかったため、ログインは送信していません。入力欄の状態を確認し、必要なら手動で操作するか個別コピーを使ってください。");
+    }
+    // Typed text must change at least a few pixel columns in the field. A blinking caret alone touches at most ~4 columns.
+    internal static bool TextAppeared(byte[] before,byte[] after,int width,int height,InputBounds region,int length)
+    {
+        if(before==null||after==null||length<=0||!ValidBounds(region,width,height))return false;
+        try
+        {
+            using var aStream=new MemoryStream(before);using var bStream=new MemoryStream(after);
+            using var a=new Bitmap(aStream);using var b=new Bitmap(bStream);
+            if(a.Width!=width||b.Width!=width||a.Height!=height||b.Height!=height)return false;
+            var columns=0;
+            for(var x=region.X;x<region.X+region.Width;x++)
+                for(var y=region.Y;y<region.Y+region.Height;y++)
+                {
+                    var c=a.GetPixel(x,y);var d=b.GetPixel(x,y);
+                    if(Math.Abs(c.R-d.R)>24||Math.Abs(c.G-d.G)>24||Math.Abs(c.B-d.B)>24){columns++;break;}
+                }
+            return columns>=4+Math.Min(length,8);
+        }
+        catch(ArgumentException){return false;}
+        catch(ExternalException){return false;}
     }
     public static void Guard(IntPtr hwnd,CancellationToken ct)
     {
