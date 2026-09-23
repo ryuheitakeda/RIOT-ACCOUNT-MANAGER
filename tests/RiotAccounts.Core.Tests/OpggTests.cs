@@ -79,6 +79,14 @@ public sealed class OpggTests
     }
 
     [Fact]
+    public void ProfileUrlUsesRegionAndEscapesRiotId()
+    {
+        Assert.Equal("https://op.gg/lol/summoners/jp/Player-JP1", OpggRegions.ProfileUrl(new("lol", "Player", "JP1", "JP1")).AbsoluteUri);
+        Assert.Equal("https://op.gg/lol/summoners/euw/%E3%81%82%20b-%23%2F1", OpggRegions.ProfileUrl(new("lol", "あ b", "#/1", "EUW1")).AbsoluteUri);
+        Assert.Throws<ArgumentException>(() => OpggRegions.ProfileUrl(new("lol", "Player", "JP1", "PBE1")));
+    }
+
+    [Fact]
     public void ParseGameMapsFieldsAndRewritesOwnPuuid()
     {
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(GamePayload(new("abc", 420, Now))));

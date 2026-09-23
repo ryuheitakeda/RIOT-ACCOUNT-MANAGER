@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
@@ -179,6 +181,13 @@ public partial class MainWindow:Window
     }
     private void CopyUser_Click(object sender,RoutedEventArgs e){if(Selected is{} a)Copy(a,false);}
     private void CopyPassword_Click(object sender,RoutedEventArgs e){if(Selected is{} a)Copy(a,true);}
+    private void OpenOpgg_Click(object sender,RoutedEventArgs e)
+    {
+        if(Selected is not{} a)return;
+        try{Process.Start(new ProcessStartInfo(OpggRegions.ProfileUrl(a.Lol).AbsoluteUri){UseShellExecute=true});StatusText.Text="OP.GGをブラウザで開きました。";}
+        catch(ArgumentException ex){StatusText.Text=ex.Message;}
+        catch(Win32Exception){StatusText.Text="ブラウザを起動できませんでした。";}
+    }
     private void Copy(RiotAccount account,bool password)
     {
         try
