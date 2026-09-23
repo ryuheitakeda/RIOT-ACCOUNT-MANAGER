@@ -79,6 +79,8 @@ public static class OpggRegions
         ["TR1"]="tr", ["RU"]="ru", ["ME1"]="me", ["OC1"]="oce", ["SG2"]="sg", ["TW2"]="tw", ["VN2"]="vn"
     };
     public static string Region(string platform) => Map.TryGetValue(platform, out var value) ? value : throw new ArgumentException("OP.GGが対応していないサーバーです。");
+    public static Uri ProfileUrl(GameProfile profile) =>
+        new($"https://op.gg/lol/summoners/{Region(profile.Platform)}/{Uri.EscapeDataString(profile.GameName)}-{Uri.EscapeDataString(profile.TagLine)}");
 }
 
 /// <summary>The account as OP.GG knows it. OP.GG's PUUID is encrypted for OP.GG, so it never equals the one from the user's Riot API key.</summary>
