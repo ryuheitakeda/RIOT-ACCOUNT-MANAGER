@@ -1,7 +1,27 @@
 namespace RiotAccounts.Core;
 
+public sealed record AccountOverview(string Rank, string LastPlayed);
+
 public static class Analytics
 {
+    // Built from saved observations only; the list must not trigger any fetch.
+    public static AccountOverview Overview(AccountCache cache, DateTimeOffset now)
+    {
+        var latest = cache.Ranks.MaxBy(s => s.ObservedAt);
+        var rank = latest == null ? "ランク未取得"
+            : latest.Entries.FirstOrDefault(e => e.QueueType == Queues.Solo) is { } solo ? $"Solo {solo.Display}"
+            : latest.Entries.FirstOrDefault(e => e.QueueType == Queues.Flex) is { } flex ? $"Flex {flex.Display}"
+            : "UNRANKED";
+        var last = cache.Matches.Count == 0 ? (DateTimeOffset?)null : cache.Matches.Max(m => m.StartedAt);
+        return new(rank, last is { } at ? Ago(at, now) : "試合未取得");
+    }
+
+    public static string Ago(DateTimeOffset at, DateTimeOffset now)
+    {
+        var days = (now.Date - at.ToOffset(now.Offset).Date).Days;
+        return days <= 0 ? "今日" : days == 1 ? "昨日" : $"{days}日前";
+    }
+
     public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count)
     {
         var definition = Queues.Get(queue);

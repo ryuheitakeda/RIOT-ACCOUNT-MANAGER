@@ -5,11 +5,12 @@ using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 
 namespace RiotAccounts.App;
-public sealed record AccountItem(RiotAccount Account)
+public sealed record AccountItem(RiotAccount Account,AccountOverview Overview)
 {
     public string Label=>Account.Label;
     public string RiotId=>Account.RiotId;
     public string Platform=>Account.Lol.Platform;
+    public string Summary=>$"{Overview.Rank}  ·  {Overview.LastPlayed}";
 }
 public partial class MainWindow:Window
 {
@@ -29,6 +30,7 @@ public partial class MainWindow:Window
     private readonly NativeLogin login;
     private CancellationTokenSource? operation;
     private bool initialized;
+    private Dictionary<Guid,AccountOverview> overviews=[];
     private RiotAccount? Selected=>(AccountsList.SelectedItem as AccountItem)?.Account;
     private string Queue=>QueuePicker.SelectedValue as string??Queues.Solo;
     public MainWindow(Store store,string folder)
@@ -42,10 +44,12 @@ public partial class MainWindow:Window
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
         Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
     }
-    private void Reload(Guid? select=null)
+    // Searching only filters, so it reuses the overviews instead of reading every cache per keystroke.
+    private void Reload(Guid? select=null,bool keepOverviews=false)
     {
-        var selectedId=select??Selected?.Id;var search=Search.Text.Trim();
-        var list=store.Accounts().Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)).Select(a=>new AccountItem(a)).ToList();
+        var selectedId=select??Selected?.Id;var search=Search.Text.Trim();var accounts=store.Accounts();
+        if(!keepOverviews||accounts.Any(a=>!overviews.ContainsKey(a.Id))){var now=DateTimeOffset.Now;overviews=accounts.ToDictionary(a=>a.Id,a=>Analytics.Overview(store.Cache(a.Id),now));}
+        var list=accounts.Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)).Select(a=>new AccountItem(a,overviews[a.Id])).ToList();
         AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();UpdateAccountReorderingAvailability();
     }
     private void Render()
@@ -150,7 +154,7 @@ public partial class MainWindow:Window
             else target.Dispatcher.BeginInvoke(()=>{if(Active)target.Text=message;});
         }
     }
-    private void Search_Changed(object sender,TextChangedEventArgs e){if(initialized)Reload();}
+    private void Search_Changed(object sender,TextChangedEventArgs e){if(initialized)Reload(keepOverviews:true);}
     private void Account_Changed(object sender,SelectionChangedEventArgs e)=>Render();
     private void Analysis_Changed(object sender,SelectionChangedEventArgs e)=>Render();
     private void Add_Click(object sender,RoutedEventArgs e)=>Edit(null);
