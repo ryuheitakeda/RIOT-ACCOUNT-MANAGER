@@ -186,3 +186,44 @@ public sealed class SettingsDialog : Window
         buttons.Children.Add(cancel); buttons.Children.Add(save); form.Children.Add(buttons);
     }
 }
+
+public sealed class ScoreboardDialog : Window
+{
+    public ScoreboardDialog(MatchRecord match, string puuid)
+    {
+        var form = DialogLayout.Form(this, "試合詳細", 640);
+        form.Children.Add(new TextBlock
+        {
+            Text = $"{Queues.MatchName(match.QueueId)}  /  {match.StartedAt.LocalDateTime:yyyy/MM/dd HH:mm}  /  {match.DurationSeconds / 60}分{match.DurationSeconds % 60:D2}秒",
+            FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 4)
+        });
+        form.Children.Add(DialogLayout.Hint("他のプレイヤーの名前は保存していないため、チャンピオンと成績のみ表示します。"));
+        var selfRow = new Style(typeof(DataGridRow));
+        var trigger = new DataTrigger { Binding = new System.Windows.Data.Binding(nameof(ScoreboardRow.IsSelf)), Value = true };
+        trigger.Setters.Add(new Setter(BackgroundProperty, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDD, 0xEA, 0xF4))));
+        trigger.Setters.Add(new Setter(FontWeightProperty, FontWeights.SemiBold));
+        selfRow.Triggers.Add(trigger);
+        foreach (var team in Analytics.Scoreboard(match, puuid))
+        {
+            form.Children.Add(new TextBlock { Text = team.Title, FontSize = 16, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 6) });
+            var grid = new DataGrid
+            {
+                ItemsSource = team.Players, IsReadOnly = true, AutoGenerateColumns = false, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column,
+                GridLinesVisibility = DataGridGridLinesVisibility.Horizontal, BorderThickness = new Thickness(0), RowHeight = 32, RowStyle = selfRow,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            void Column(string header, string path, DataGridLength width) =>
+                grid.Columns.Add(new DataGridTextColumn { Header = header, Binding = new System.Windows.Data.Binding(path), Width = width });
+            Column("チャンピオン", nameof(ScoreboardRow.Champion), new DataGridLength(1, DataGridLengthUnitType.Star));
+            Column("ロール", nameof(ScoreboardRow.Role), new DataGridLength(90));
+            Column("K / D / A", nameof(ScoreboardRow.Kda), new DataGridLength(100));
+            Column("CS/分", nameof(ScoreboardRow.CsPerMinute), new DataGridLength(70));
+            Column("視界", nameof(ScoreboardRow.VisionScore), new DataGridLength(60));
+            AutomationProperties.SetName(grid, team.Title);
+            form.Children.Add(grid);
+        }
+        var close = new Button { Content = "閉じる", IsCancel = true, IsDefault = true, HorizontalAlignment = HorizontalAlignment.Right, Style = (Style)FindResource("Primary") };
+        close.Click += (_, _) => Close();
+        form.Children.Add(close);
+    }
+}

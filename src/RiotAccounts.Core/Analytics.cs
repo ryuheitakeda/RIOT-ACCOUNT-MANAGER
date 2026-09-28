@@ -1,6 +1,8 @@
 namespace RiotAccounts.Core;
 
 public sealed record AccountOverview(string Rank, string LastPlayed);
+public sealed record ScoreboardRow(string Champion, string Role, string Kda, string CsPerMinute, int VisionScore, bool IsSelf);
+public sealed record ScoreboardTeam(string Title, List<ScoreboardRow> Players);
 
 public static class Analytics
 {
@@ -20,6 +22,27 @@ public static class Analytics
     {
         var days = (now.Date - at.ToOffset(now.Offset).Date).Days;
         return days <= 0 ? "今日" : days == 1 ? "昨日" : $"{days}日前";
+    }
+
+    private static readonly string[] RoleOrder = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"];
+
+    public static string RoleName(string role) => role switch
+    {
+        "TOP" => "トップ", "JUNGLE" => "ジャングル", "MIDDLE" => "ミッド", "BOTTOM" => "ボット", "UTILITY" => "サポート", _ => "—"
+    };
+
+    // Other players are shown by champion and stats only; their names and PUUIDs are never displayed.
+    public static List<ScoreboardTeam> Scoreboard(MatchRecord match, string puuid)
+    {
+        var minutes = Math.Max(1, match.DurationSeconds) / 60.0;
+        return match.Participants.GroupBy(p => p.TeamId)
+            .OrderByDescending(g => g.Any(p => p.Puuid == puuid)).ThenBy(g => g.Key)
+            .Select(g => new ScoreboardTeam(
+                $"{(g.Key == 200 ? "レッド" : "ブルー")}チーム — {(g.Any(p => p.Win) ? "勝利" : "敗北")}" + (g.Any(p => p.Puuid == puuid) ? "（自分）" : ""),
+                g.OrderBy(p => Array.IndexOf(RoleOrder, p.Role) is var i and >= 0 ? i : RoleOrder.Length)
+                    .Select(p => new ScoreboardRow(p.Champion, RoleName(p.Role), $"{p.Kills} / {p.Deaths} / {p.Assists}",
+                        (p.Cs / minutes).ToString("F1"), p.VisionScore, p.Puuid == puuid)).ToList()))
+            .ToList();
     }
 
     public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count)
