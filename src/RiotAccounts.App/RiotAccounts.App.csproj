@@ -2,11 +2,12 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest>app.manifest</ApplicationManifest><ApplicationIcon>Assets/RiotAccounts.ico</ApplicationIcon>
     <AssemblyName>RiotAccounts</AssemblyName><Version>0.5.0</Version>
     <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <Resource Include="Assets/RiotAccounts.ico" />
     <ProjectReference Include="../RiotAccounts.Core/RiotAccounts.Core.csproj" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
     <PackageReference Include="ScottPlot.WPF" Version="5.1.59" />
