@@ -40,7 +40,7 @@ public partial class MainWindow
         try
         {
             store.MoveAccount(id, target, after);
-            Reload(selectedId);
+            Reload(selectedId, keepOverviews: true);
             StatusText.Text = "アカウントの順番を保存しました。";
             return true;
         }
