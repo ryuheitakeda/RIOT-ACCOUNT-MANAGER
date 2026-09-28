@@ -39,6 +39,10 @@ public sealed record Performance(string Name, int Games, int Wins, double Kda, d
     public double WinRate => Games == 0 ? 0 : Wins * 100.0 / Games;
     public string Display => $"{Name}    {Games}戦  {WinRate:F0}%    KDA {Kda:F2}    CS/分 {CsPerMinute:F1}";
 }
+public sealed record ChampionAcrossAccounts(Performance Total, List<(string Account, int Games)> Accounts)
+{
+    public string Breakdown => string.Join("  /  ", Accounts.Select(a => $"{a.Account} {a.Games}戦"));
+}
 public sealed record QueueDefinition(string Key, string Name, IReadOnlyList<int> QueueIds, bool IsRanked);
 public static class Queues
 {
