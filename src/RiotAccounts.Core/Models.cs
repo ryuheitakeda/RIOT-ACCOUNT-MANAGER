@@ -3,7 +3,8 @@ using System.Text.Json.Serialization;
 namespace RiotAccounts.Core;
 
 public sealed record GameProfile(string Game, string GameName, string TagLine, string Platform, string? Puuid = null);
-public sealed record RiotAccount(Guid Id, string Label, List<GameProfile> Profiles)
+// Note is stored in plain text like the label; it must never hold credentials.
+public sealed record RiotAccount(Guid Id, string Label, List<GameProfile> Profiles, string? Note = null)
 {
     [JsonIgnore] public GameProfile Lol => Profiles.Single(p => p.Game == "lol");
     [JsonIgnore] public string RiotId => $"{Lol.GameName}#{Lol.TagLine}";

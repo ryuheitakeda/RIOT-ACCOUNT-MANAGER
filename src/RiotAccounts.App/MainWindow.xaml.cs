@@ -50,14 +50,14 @@ public partial class MainWindow:Window
     {
         var selectedId=select??Selected?.Id;var search=Search.Text.Trim();var accounts=store.Accounts();
         if(!keepOverviews||accounts.Any(a=>!overviews.ContainsKey(a.Id))){var now=DateTimeOffset.Now;overviews=accounts.ToDictionary(a=>a.Id,a=>Analytics.Overview(store.Cache(a.Id),now));}
-        var list=accounts.Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)).Select(a=>new AccountItem(a,overviews[a.Id])).ToList();
+        var list=accounts.Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)||(a.Note?.Contains(search,StringComparison.CurrentCultureIgnoreCase)??false)).Select(a=>new AccountItem(a,overviews[a.Id])).ToList();
         AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();UpdateAccountReorderingAvailability();
     }
     private void Render()
     {
         if(!initialized)return;
         var a=Selected;EmptyPanel.Visibility=a==null?Visibility.Visible:Visibility.Collapsed;DetailPanel.Visibility=a==null?Visibility.Collapsed:Visibility.Visible;if(a==null)return;
-        AccountTitle.Text=a.Label;var seen=store.Cache(a.Id);var last=new[]{seen.Ranks.LastOrDefault()?.ObservedAt,seen.MatchesUpdatedAt}.Max();
+        AccountTitle.Text=a.Label;AccountNote.Text=a.Note??"";AccountNote.Visibility=a.Note==null?Visibility.Collapsed:Visibility.Visible;var seen=store.Cache(a.Id);var last=new[]{seen.Ranks.LastOrDefault()?.ObservedAt,seen.MatchesUpdatedAt}.Max();
         AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {(UsingOpgg?"OP.GG（非公式）":"Riot API")}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
         var ranked=Queues.Get(Queue).IsRanked;
         if(!ranked&&HistoryTab.IsSelected)DetailTabs.SelectedItem=OverviewTab;

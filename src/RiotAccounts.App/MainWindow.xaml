@@ -11,7 +11,7 @@
    <Border Background="White" CornerRadius="10" Padding="16">
     <DockPanel>
      <Button DockPanel.Dock="Bottom" Content="＋ アカウントを追加" Click="Add_Click" Margin="0,16,0,0"/>
-     <StackPanel DockPanel.Dock="Top"><TextBlock Text="アカウント" FontSize="18" FontWeight="SemiBold"/><TextBox x:Name="Search" TextChanged="Search_Changed" ToolTip="管理名・Riot IDで検索" AutomationProperties.Name="アカウントを検索" Margin="0,14,0,8"/><TextBlock x:Name="AccountReorderHint" Foreground="#597183" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/></StackPanel>
+     <StackPanel DockPanel.Dock="Top"><TextBlock Text="アカウント" FontSize="18" FontWeight="SemiBold"/><TextBox x:Name="Search" TextChanged="Search_Changed" ToolTip="管理名・Riot ID・メモで検索" AutomationProperties.Name="アカウントを検索" Margin="0,14,0,8"/><TextBlock x:Name="AccountReorderHint" Foreground="#597183" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/></StackPanel>
      <Grid>
       <ListBox x:Name="AccountsList" SelectionChanged="Account_Changed" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled" KeyboardNavigation.TabNavigation="Continue" AllowDrop="True" PreviewDragOver="Accounts_DragOver" PreviewDragLeave="Accounts_DragLeave" PreviewDrop="Accounts_Drop">
        <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="8,12"/><Setter Property="Margin" Value="0,2"/></Style></ListBox.ItemContainerStyle>
@@ -33,7 +33,7 @@
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
      <Border Background="#DDEAF4" CornerRadius="10" Padding="22">
       <StackPanel>
-       <DockPanel><StackPanel DockPanel.Dock="Right" Orientation="Horizontal"><Button Content="編集" Click="Edit_Click"/><Button Content="削除" Click="Delete_Click" Margin="0"/></StackPanel><StackPanel><TextBlock x:Name="AccountTitle" FontSize="25" FontWeight="SemiBold"/><TextBlock x:Name="AccountIdentity" Foreground="#45647A" Margin="0,5,0,0"/></StackPanel></DockPanel>
+       <DockPanel><StackPanel DockPanel.Dock="Right" Orientation="Horizontal"><Button Content="編集" Click="Edit_Click"/><Button Content="削除" Click="Delete_Click" Margin="0"/></StackPanel><StackPanel><TextBlock x:Name="AccountTitle" FontSize="25" FontWeight="SemiBold"/><TextBlock x:Name="AccountIdentity" Foreground="#45647A" Margin="0,5,0,0"/><TextBlock x:Name="AccountNote" Foreground="#2B4556" TextWrapping="Wrap" Margin="0,8,0,0" AutomationProperties.Name="メモ"/></StackPanel></DockPanel>
        <WrapPanel Margin="0,20,0,0"><Button Content="Riotにログイン" Style="{StaticResource Primary}" Click="Login_Click"/><Button Content="IDをコピー" Click="CopyUser_Click"/><Button Content="パスワードをコピー" Click="CopyPassword_Click"/><Button Content="OP.GGで開く" Click="OpenOpgg_Click" ToolTip="このアカウントのOP.GGページをブラウザで開く"/></WrapPanel>
        <TextBlock Text="別のアカウントからは先にログアウトしてください。追加認証はRiot画面で行います。" FontSize="12" Foreground="#45647A" Margin="0,12,0,0"/>
       </StackPanel>
