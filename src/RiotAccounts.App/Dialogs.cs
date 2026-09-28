@@ -44,6 +44,7 @@ public sealed class AccountDialog : Window
         var gameName = new TextBox { Text = account?.Lol.GameName ?? "" };
         var tag = new TextBox { Text = account?.Lol.TagLine ?? "" };
         var platform = new ComboBox { ItemsSource = Regions.Routing.Keys.ToList(), SelectedItem = account?.Lol.Platform ?? "JP1" };
+        var note = new TextBox { Text = account?.Note ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 64, MaxHeight = 140, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         if (account != null) username.Text = store.Credentials(account.Id).Username;
         DialogLayout.Field(form, "管理名", label);
         DialogLayout.Field(form, "ログインID（Riot IDとは別）", username);
@@ -51,6 +52,8 @@ public sealed class AccountDialog : Window
         DialogLayout.Field(form, "Riot ID：ゲーム内の名前", gameName);
         DialogLayout.Field(form, "Riot ID：タグ（#を除く）", tag);
         DialogLayout.Field(form, "サーバー", platform);
+        DialogLayout.Field(form, "メモ（任意）", note);
+        form.Children.Add(DialogLayout.Hint("メモは暗号化せずに保存します。パスワードなどのログイン情報は書かないでください。"));
         if (account != null) form.Children.Add(DialogLayout.Hint("Riot ID・サーバーを変更すると、このアカウントの保存済みランク・戦績を消去し、次回更新で取得し直します。"));
         form.Children.Add(DialogLayout.Hint("ログイン情報は、このWindowsユーザーだけが復号できる形式で保存します。"));
         var error = DialogLayout.Hint("");
@@ -73,7 +76,7 @@ public sealed class AccountDialog : Window
                 var profiles = account?.Profiles.Where(p => p.Game != "lol").ToList() ?? [];
                 profiles.Add(profile);
                 SavedId = account?.Id ?? Guid.NewGuid();
-                store.Save(new RiotAccount(SavedId, label.Text.Trim(), profiles), new Credentials(username.Text.Trim(), actualPassword));
+                store.Save(new RiotAccount(SavedId, label.Text.Trim(), profiles, string.IsNullOrWhiteSpace(note.Text) ? null : note.Text.Trim()), new Credentials(username.Text.Trim(), actualPassword));
                 password.Clear();
                 DialogResult = true;
             }
