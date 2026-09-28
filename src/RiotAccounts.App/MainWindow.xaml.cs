@@ -12,6 +12,7 @@ public sealed record AccountItem(RiotAccount Account,AccountOverview Overview)
     public string Platform=>Account.Lol.Platform;
     public string Summary=>$"{Overview.Rank}  ·  {Overview.LastPlayed}";
 }
+public sealed record MatchRow(MatchRecord Match,string When,string Mode,string Result,string Champion,string Kda,string Cs);
 public partial class MainWindow:Window
 {
     private readonly Store store;
@@ -84,10 +85,23 @@ public partial class MainWindow:Window
         var summary=Analytics.Summarize(recent,a.Lol.Puuid??"",_=>"全体").FirstOrDefault();
         PerformanceText.Text=summary==null?"まだ戦績がありません。":$"{summary.Games}戦  {summary.Wins}勝 {summary.Games-summary.Wins}敗  /  勝率 {summary.WinRate:F1}%\nKDA {summary.Kda:F2}    CS/分 {summary.CsPerMinute:F1}    平均視界スコア {summary.VisionPerGame:F1}";
         UpdatedText.Text=cache.QueueUpdatedAt.TryGetValue(Queue,out var updated)?$"戦績取得 {updated.LocalDateTime:yyyy/MM/dd HH:mm}  /  リメイクは集計対象外":"このキューの戦績は未取得です。";
-        MatchesGrid.ItemsSource=recent.Select(m=>{var p=m.Participants.Single(p=>p.Puuid==a.Lol.Puuid);return new{When=m.StartedAt.LocalDateTime.ToString("MM/dd HH:mm"),Mode=Queues.MatchName(m.QueueId),Result=p.Win?"勝利":"敗北",Champion=p.Champion,Kda=$"{p.Kills} / {p.Deaths} / {p.Assists}",Cs=(p.Cs/(m.DurationSeconds/60.0)).ToString("F1")};}).ToList();
+        MatchesGrid.ItemsSource=recent.Select(m=>{var p=m.Participants.Single(p=>p.Puuid==a.Lol.Puuid);return new MatchRow(m,m.StartedAt.LocalDateTime.ToString("MM/dd HH:mm"),Queues.MatchName(m.QueueId),p.Win?"勝利":"敗北",p.Champion,$"{p.Kills} / {p.Deaths} / {p.Assists}",(p.Cs/(m.DurationSeconds/60.0)).ToString("F1"));}).ToList();
         ChampionStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>p.Champion);
         RoleStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>string.IsNullOrEmpty(p.Role)?"不明":p.Role);
         if(ranked)DrawHistory(cache);
+        if(AnalysisTab.IsSelected)RenderCrossAccount();
+    }
+    // Reads every account's cache, so it runs only while the analysis tab is shown.
+    private void RenderCrossAccount()
+    {
+        var count=CountPicker.SelectedIndex==1?50:20;
+        var accounts=store.Accounts();
+        CrossChampionNote.Text=$"登録済み{accounts.Count}アカウントの保存済み戦績から、選択中のキューの各アカウント直近{count}戦を合計します。複数の自アカウントが同じ試合に出た場合は、アカウントごとに1戦と数えます。";
+        CrossChampionStats.ItemsSource=Analytics.ChampionsAcrossAccounts(accounts.Where(a=>a.Lol.Puuid!=null).Select(a=>(a.Label,store.Cache(a.Id),a.Lol.Puuid!)),Queue,count);
+    }
+    private void DetailTabs_Changed(object sender,SelectionChangedEventArgs e)
+    {
+        if(initialized&&ReferenceEquals(e.OriginalSource,DetailTabs)&&AnalysisTab.IsSelected&&Selected!=null)RenderCrossAccount();
     }
     private void DrawHistory(AccountCache cache)
     {
@@ -210,6 +224,15 @@ public partial class MainWindow:Window
     private async void RefreshAnalysis_Click(object sender,RoutedEventArgs e)
     {
         if(Selected is{} a){var queue=Queue;var count=CountPicker.SelectedIndex==1?50:20;await Run((progress,ct)=>Provider.RefreshAnalysisAsync(a,queue,count,progress,ct));}
+    }
+    private void Matches_DoubleClick(object sender,System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if(e.OriginalSource is DependencyObject source&&ItemsControl.ContainerFromElement(MatchesGrid,source) is DataGridRow)ShowScoreboard();
+    }
+    private void Matches_KeyDown(object sender,System.Windows.Input.KeyEventArgs e){if(e.Key==System.Windows.Input.Key.Enter){e.Handled=true;ShowScoreboard();}}
+    private void ShowScoreboard()
+    {
+        if(Selected is{} a&&MatchesGrid.SelectedItem is MatchRow row)new ScoreboardDialog(row.Match,a.Lol.Puuid??""){Owner=this}.ShowDialog();
     }
     private void Cancel_Click(object sender,RoutedEventArgs e)=>operation?.Cancel();
     private void Settings_Click(object sender,RoutedEventArgs e)

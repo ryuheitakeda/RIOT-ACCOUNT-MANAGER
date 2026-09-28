@@ -1,6 +1,8 @@
 namespace RiotAccounts.Core;
 
 public sealed record AccountOverview(string Rank, string LastPlayed);
+public sealed record ScoreboardRow(string Champion, string Role, string Kda, string CsPerMinute, int VisionScore, bool IsSelf);
+public sealed record ScoreboardTeam(string Title, List<ScoreboardRow> Players);
 
 public static class Analytics
 {
@@ -20,6 +22,27 @@ public static class Analytics
     {
         var days = (now.Date - at.ToOffset(now.Offset).Date).Days;
         return days <= 0 ? "今日" : days == 1 ? "昨日" : $"{days}日前";
+    }
+
+    private static readonly string[] RoleOrder = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"];
+
+    public static string RoleName(string role) => role switch
+    {
+        "TOP" => "トップ", "JUNGLE" => "ジャングル", "MIDDLE" => "ミッド", "BOTTOM" => "ボット", "UTILITY" => "サポート", _ => "—"
+    };
+
+    // Other players are shown by champion and stats only; their names and PUUIDs are never displayed.
+    public static List<ScoreboardTeam> Scoreboard(MatchRecord match, string puuid)
+    {
+        var minutes = Math.Max(1, match.DurationSeconds) / 60.0;
+        return match.Participants.GroupBy(p => p.TeamId)
+            .OrderByDescending(g => g.Any(p => p.Puuid == puuid)).ThenBy(g => g.Key)
+            .Select(g => new ScoreboardTeam(
+                $"{(g.Key == 200 ? "レッド" : "ブルー")}チーム — {(g.Any(p => p.Win) ? "勝利" : "敗北")}" + (g.Any(p => p.Puuid == puuid) ? "（自分）" : ""),
+                g.OrderBy(p => Array.IndexOf(RoleOrder, p.Role) is var i and >= 0 ? i : RoleOrder.Length)
+                    .Select(p => new ScoreboardRow(p.Champion, RoleName(p.Role), $"{p.Kills} / {p.Deaths} / {p.Assists}",
+                        (p.Cs / minutes).ToString("F1"), p.VisionScore, p.Puuid == puuid)).ToList()))
+            .ToList();
     }
 
     public static List<MatchRecord> Recent(AccountCache cache, string puuid, string queue, int count)
@@ -45,15 +68,31 @@ public static class Analytics
 
     public static List<Performance> Summarize(IEnumerable<MatchRecord> matches, string puuid, Func<Participant, string> group)
     {
-        return matches.DistinctBy(m => m.Id).Where(m => !m.Remake && m.DurationSeconds > 0)
-            .Select(m => (Match: m, Player: m.Participants.SingleOrDefault(p => p.Puuid == puuid)))
-            .Where(x => x.Player != null).GroupBy(x => group(x.Player!))
-            .Select(g => new Performance(g.Key, g.Count(), g.Count(x => x.Player!.Win),
-                g.Sum(x => x.Player!.Kills + x.Player.Assists) / (double)Math.Max(1, g.Sum(x => x.Player!.Deaths)),
-                g.Sum(x => x.Player!.Cs) / (g.Sum(x => x.Match.DurationSeconds) / 60.0),
-                g.Average(x => x.Player!.VisionScore)))
+        return Played(matches, puuid).GroupBy(x => group(x.Player))
+            .Select(g => Aggregate(g.Key, g.ToList()))
             .OrderByDescending(x => x.Games).ThenBy(x => x.Name).ToList();
     }
+
+    // Each account counts its own games, so a game shared by two own accounts (a duo) counts once per account.
+    public static List<ChampionAcrossAccounts> ChampionsAcrossAccounts(IEnumerable<(string Label, AccountCache Cache, string Puuid)> accounts, string queue, int count)
+    {
+        return accounts.SelectMany(a => Played(Recent(a.Cache, a.Puuid, queue, count), a.Puuid).Select(x => (a.Label, x.Match, x.Player)))
+            .GroupBy(x => x.Player.Champion)
+            .Select(g => new ChampionAcrossAccounts(Aggregate(g.Key, g.Select(x => (x.Match, x.Player)).ToList()),
+                g.GroupBy(x => x.Label).Select(a => (Account: a.Key, Games: a.Count()))
+                    .OrderByDescending(a => a.Games).ThenBy(a => a.Account, StringComparer.CurrentCultureIgnoreCase).ToList()))
+            .OrderByDescending(x => x.Total.Games).ThenBy(x => x.Total.Name).ToList();
+    }
+
+    private static IEnumerable<(MatchRecord Match, Participant Player)> Played(IEnumerable<MatchRecord> matches, string puuid) =>
+        matches.DistinctBy(m => m.Id).Where(m => !m.Remake && m.DurationSeconds > 0)
+            .Select(m => (Match: m, Player: m.Participants.SingleOrDefault(p => p.Puuid == puuid)))
+            .Where(x => x.Player != null).Select(x => (x.Match, x.Player!));
+
+    private static Performance Aggregate(string name, List<(MatchRecord Match, Participant Player)> games) => new(name, games.Count, games.Count(x => x.Player.Win),
+        games.Sum(x => x.Player.Kills + x.Player.Assists) / (double)Math.Max(1, games.Sum(x => x.Player.Deaths)),
+        games.Sum(x => x.Player.Cs) / (games.Sum(x => x.Match.DurationSeconds) / 60.0),
+        games.Average(x => x.Player.VisionScore));
 
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
     {
