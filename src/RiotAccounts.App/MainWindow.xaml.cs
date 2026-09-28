@@ -89,6 +89,19 @@ public partial class MainWindow:Window
         ChampionStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>p.Champion);
         RoleStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>string.IsNullOrEmpty(p.Role)?"不明":p.Role);
         if(ranked)DrawHistory(cache);
+        if(AnalysisTab.IsSelected)RenderCrossAccount();
+    }
+    // Reads every account's cache, so it runs only while the analysis tab is shown.
+    private void RenderCrossAccount()
+    {
+        var count=CountPicker.SelectedIndex==1?50:20;
+        var accounts=store.Accounts();
+        CrossChampionNote.Text=$"登録済み{accounts.Count}アカウントの保存済み戦績から、選択中のキューの各アカウント直近{count}戦を合計します。複数の自アカウントが同じ試合に出た場合は、アカウントごとに1戦と数えます。";
+        CrossChampionStats.ItemsSource=Analytics.ChampionsAcrossAccounts(accounts.Where(a=>a.Lol.Puuid!=null).Select(a=>(a.Label,store.Cache(a.Id),a.Lol.Puuid!)),Queue,count);
+    }
+    private void DetailTabs_Changed(object sender,SelectionChangedEventArgs e)
+    {
+        if(initialized&&ReferenceEquals(e.OriginalSource,DetailTabs)&&AnalysisTab.IsSelected&&Selected!=null)RenderCrossAccount();
     }
     private void DrawHistory(AccountCache cache)
     {
