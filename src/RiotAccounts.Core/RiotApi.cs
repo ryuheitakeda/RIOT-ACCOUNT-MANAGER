@@ -210,7 +210,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             return;
         }
         var recent = Analytics.Recent(cache, profile.Puuid!, queue, int.MaxValue)
-            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(20);
+            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(Analytics.ForecastMatches);
         var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
             .Select(p => p.Puuid).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
         for (var i = 0; i < opponents.Count; i++)

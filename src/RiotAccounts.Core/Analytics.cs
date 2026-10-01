@@ -94,11 +94,14 @@ public static class Analytics
         games.Sum(x => x.Player.Cs) / (games.Sum(x => x.Match.DurationSeconds) / 60.0),
         games.Average(x => x.Player.VisionScore));
 
+    // Forecast window: the minimum match count the forecast needs, so opponent rank lookups stay at most 10 x 5.
+    public const int ForecastMatches = 10;
+
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
     {
         if (!Queues.IsRanked(queue)) throw new ArgumentException("参考ランク帯はランク戦のみ対応しています。", nameof(queue));
         var matches = Recent(cache, puuid, queue, int.MaxValue)
-            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(20).ToList();
+            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(ForecastMatches).ToList();
         var observations = cache.Opponents.Where(o => o.QueueType == queue && o.ObservedAt <= now && o.ObservedAt >= now.AddHours(-24))
             .GroupBy(o => o.Puuid).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
         var values = new List<int>();

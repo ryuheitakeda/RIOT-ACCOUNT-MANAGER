@@ -93,7 +93,7 @@ public void ForecastWindow()
     cache.Matches.Add(Match(53) with { Remake = true });
     cache.Matches.Add(cache.Matches[0]);
     var prediction = Analytics.Predict(cache, "self", Queues.Solo, Now());
-    Equal(20, prediction.MatchCount); Equal(100, prediction.TotalPlayers); Equal(100, prediction.KnownPlayers);
+    Equal(10, prediction.MatchCount); Equal(50, prediction.TotalPlayers); Equal(50, prediction.KnownPlayers);
     Equal(1, Analytics.Predict(cache, "self", Queues.Flex, Now()).MatchCount);
     Equal(0, Analytics.Predict(cache, "unknown", Queues.Solo, Now()).MatchCount);
 }
