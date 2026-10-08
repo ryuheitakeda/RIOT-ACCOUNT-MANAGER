@@ -49,8 +49,39 @@ static object ApiMatch(int index, DateTimeOffset? started = null) => new
     info = new { queueId = 420, gameStartTimestamp = (started ?? DateTimeOffset.UtcNow.AddHours(-1)).ToUnixTimeMilliseconds(), gameDuration = 1800,
         participants = Match(index).Participants.Select(p => new { puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion,
             teamPosition = p.Role, kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = 180,
-            neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win }) }
+            neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win, summonerLevel = p.SummonerLevel }) }
 };
+
+// Match 0's lineup as a one-hour-old game of any queue, for refreshes that run against the real clock.
+static object ApiMatchIn(string id, int queueId) => new
+{
+    metadata = new { matchId = id },
+    info = new { queueId, gameStartTimestamp = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds(), gameDuration = 1800,
+        participants = Match(0).Participants.Select(p => new { puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion, teamPosition = p.Role,
+            kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = 180, neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win, summonerLevel = p.SummonerLevel }) }
+};
+static MatchRecord NormalMatch(int index) => Match(index) with { Id = $"JP1_N{index}", QueueId = index % 2 == 0 ? 400 : 430,
+    Participants = Match(index).Participants.Select((p, i) => p with { SummonerLevel = i == 0 ? 400 : 50 * (i + 1) }).ToList() };
+static void Observe(AccountCache cache, string puuid, int? solo, int? flex, DateTimeOffset? at = null)
+{
+    cache.Opponents.Add(new(puuid, Queues.Solo, at ?? Now().AddMinutes(-10), solo is int s ? Rank(s) : null));
+    cache.Opponents.Add(new(puuid, Queues.Flex, at ?? Now().AddMinutes(-10), flex is int f ? Rank(f, Queues.Flex) : null));
+}
+// Enemy j (0..4, levels 100..300) of every normal match: j0 Solo-ranked, j1 Flex only, j2 ranked in both, j3 unranked, j4 Solo-ranked.
+static AccountCache NormalSample()
+{
+    var cache = new AccountCache { Matches = Enumerable.Range(0, 10).Select(NormalMatch).ToList() };
+    foreach (var enemy in cache.Matches.SelectMany(m => m.Participants.Skip(1)))
+        switch (enemy.SummonerLevel / 50 - 2)
+        {
+            case 0: Observe(cache, enemy.Puuid, 5, null); break;
+            case 1: Observe(cache, enemy.Puuid, null, 10); break;
+            case 2: Observe(cache, enemy.Puuid, 15, 25); break;
+            case 3: Observe(cache, enemy.Puuid, null, null); break;
+            default: Observe(cache, enemy.Puuid, 25, null); break;
+        }
+    return cache;
+}
 
 [Fact]
 public void RankCategories()
@@ -116,6 +147,46 @@ public void MissingOpponents()
     cache.Matches[0] = cache.Matches[0] with { Participants = [cache.Matches[0].Participants[0], cache.Matches[0].Participants[1], cache.Matches[0].Participants[1]] };
     var forecast = Analytics.Predict(cache, "self", Queues.Solo, Now());
     Equal(50, forecast.TotalPlayers); Equal(46, forecast.KnownPlayers);
+}
+[Fact]
+public void NormalForecast()
+{
+    var forecast = Analytics.Predict(NormalSample(), "self", Queues.Normal, Now());
+    Equal(10, forecast.MatchCount); Equal(50, forecast.TotalPlayers); Equal(50, forecast.KnownPlayers); Equal(10, forecast.EstimatedPlayers);
+    // Solo first, then Flex; the unranked level-250 opponents take the median of the five nearest ranked levels (200 -> order 15).
+    Equal(RankOrder.Label(10), forecast.Lower); Equal(RankOrder.Label(15), forecast.Median); Equal(RankOrder.Label(15), forecast.Upper);
+    True(forecast.Explanation.Contains("Solo/Duo") && forecast.Explanation.Contains("レベル"));
+    Equal(0, Analytics.Predict(NormalSample(), "self", Queues.Solo, Now()).MatchCount);
+    Equal(0, Analytics.Predict(new(), "self", Queues.Normal, Now()).MatchCount);
+}
+[Fact]
+public void NormalForecastSkipsMissingLookupsAndUnknownLevels()
+{
+    var cache = NormalSample();
+    var unranked = cache.Matches.SelectMany(m => m.Participants).Where(p => p.SummonerLevel == 250).Select(p => p.Puuid).ToList();
+    // Only the Solo lookup exists for the first one: it may still be Flex-ranked, so it is missing rather than unranked.
+    cache.Opponents.RemoveAll(o => o.Puuid == unranked[0] && o.QueueType == Queues.Flex);
+    // The second one comes from a cache saved before levels were recorded.
+    cache.Matches[1] = cache.Matches[1] with { Participants = cache.Matches[1].Participants.Select(p => p.Puuid == unranked[1] ? p with { SummonerLevel = 0 } : p).ToList() };
+    var forecast = Analytics.Predict(cache, "self", Queues.Normal, Now());
+    Equal(48, forecast.KnownPlayers); Equal(8, forecast.EstimatedPlayers); Equal(RankOrder.Label(15), forecast.Median);
+}
+[Fact]
+public void LevelEstimationNeedsCalibrationAndStaysOffForRanked()
+{
+    var cache = new AccountCache { Matches = Enumerable.Range(0, 10).Select(NormalMatch).ToList() };
+    foreach (var (enemy, index) in cache.Matches.SelectMany(m => m.Participants.Skip(1)).Select((e, i) => (e, i)))
+        Observe(cache, enemy.Puuid, index < 4 ? 20 : null, null);
+    var forecast = Analytics.Predict(cache, "self", Queues.Normal, Now());
+    Equal(4, forecast.KnownPlayers); Equal(0, forecast.EstimatedPlayers); Equal<string?>(null, forecast.Median); True(forecast.Explanation.Contains("レベル推定を含む"));
+    cache.Opponents.Add(new(cache.Matches[1].Participants[1].Puuid, Queues.Solo, Now(), Rank(20)));
+    forecast = Analytics.Predict(cache, "self", Queues.Normal, Now());
+    Equal(50, forecast.KnownPlayers); Equal(45, forecast.EstimatedPlayers); Equal(RankOrder.Label(20), forecast.Median);
+    var solo = Sample();
+    solo.Matches = solo.Matches.Select(m => m with { Participants = m.Participants.Select(p => p with { SummonerLevel = 100 }).ToList() }).ToList();
+    solo.Opponents = solo.Opponents.Select((o, i) => i < 10 ? o with { Rank = null } : o).ToList();
+    forecast = Analytics.Predict(solo, "self", Queues.Solo, Now());
+    Equal(40, forecast.KnownPlayers); Equal(0, forecast.EstimatedPlayers); True(!forecast.Explanation.Contains("レベル"));
 }
 [Fact]
 public void Performance()
@@ -374,13 +445,6 @@ public async Task OpponentRanksSharedAcrossQueues()
 {
     using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
     var enemyLookups = 0;
-    static object ApiMatchIn(string id, int queueId) => new
-    {
-        metadata = new { matchId = id },
-        info = new { queueId, gameStartTimestamp = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds(), gameDuration = 1800,
-            participants = Match(0).Participants.Select(p => new { puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion, teamPosition = p.Role,
-                kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = 180, neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win }) }
-    };
     using var handler = new Handler((request, _) =>
     {
         var path = request.RequestUri!.AbsolutePath;
@@ -407,6 +471,32 @@ public async Task OpponentRanksSharedAcrossQueues()
     fixture.Store.SaveCache(account.Id, cache);
     await provider.RefreshAnalysisAsync(account, Queues.Flex, 20, new InlineProgress(_ => { }), default);
     Equal(10, enemyLookups); Equal(20, fixture.Store.Cache(account.Id).Opponents.Count);
+}
+[Fact]
+public async Task NormalRefreshLooksUpOpponentRanks()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    var lookups = 0; var ownRank = false; var messages = new List<string>();
+    using var handler = new Handler((request, _) =>
+    {
+        var path = request.RequestUri!.AbsolutePath; var query = request.RequestUri.Query;
+        if (path.EndsWith("/by-puuid/self")) { ownRank = true; return Task.FromResult(Response(HttpStatusCode.OK, new[] { Rank() })); }
+        if (path.Contains("/by-puuid/enemy")) { lookups++; return Task.FromResult(Response(HttpStatusCode.OK, new[] { Rank(10) })); }
+        if (path.EndsWith("/ids")) return Task.FromResult(Response(HttpStatusCode.OK, query.Contains("queue=400") ? new[] { "JP1_0" } : query.Contains("queue=420") ? new[] { "JP1_1" } : Array.Empty<string>()));
+        if (path.EndsWith("/JP1_0")) return Task.FromResult(Response(HttpStatusCode.OK, ApiMatchIn("JP1_0", 400)));
+        if (path.EndsWith("/JP1_1")) return Task.FromResult(Response(HttpStatusCode.OK, ApiMatchIn("JP1_1", 420)));
+        return Task.FromResult(Response(HttpStatusCode.NotFound));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    var provider = new LolStatsProvider(fixture.Store, api);
+    await provider.RefreshAnalysisAsync(account, Queues.Normal, 20, new InlineProgress(messages.Add), default);
+    Equal(5, lookups); True(!ownRank); True(messages.Last().Contains("1/20戦"));
+    var cache = fixture.Store.Cache(account.Id); Equal(10, cache.Opponents.Count);
+    var forecast = cache.Forecasts.Single(); Equal(Queues.Normal, forecast.QueueType); Equal(1, forecast.MatchCount);
+    Equal(5, forecast.KnownPlayers); Equal(5, forecast.TotalPlayers); Equal(0, forecast.EstimatedPlayers);
+    // The Solo refresh meets the same opponents and reuses the normal refresh's lookups.
+    await provider.RefreshAnalysisAsync(account, Queues.Solo, 20, new InlineProgress(messages.Add), default);
+    Equal(5, lookups); Equal(5, fixture.Store.Cache(account.Id).Forecasts.Single(f => f.QueueType == Queues.Solo).KnownPlayers);
 }
 [Fact]
 public async Task PartialCancellation()
@@ -472,9 +562,9 @@ public void PlatformEditInvalidatesResolvedIdentity()
 public void ParseMatch()
 {
     using var json = JsonDocument.Parse("""
-    {"metadata":{"matchId":"JP1_123"},"info":{"queueId":420,"gameStartTimestamp":1000,"gameDuration":180,"participants":[{"puuid":"self","teamId":100,"gameEndedInEarlySurrender":true,"totalMinionsKilled":20,"neutralMinionsKilled":4}]}}
+    {"metadata":{"matchId":"JP1_123"},"info":{"queueId":420,"gameStartTimestamp":1000,"gameDuration":180,"participants":[{"puuid":"self","teamId":100,"gameEndedInEarlySurrender":true,"totalMinionsKilled":20,"neutralMinionsKilled":4,"summonerLevel":321}]}}
     """);
-    var result = LolStatsProvider.ParseMatch(json.RootElement); True(result.Remake); Equal(24, result.Participants.Single().Cs); Equal(0, result.Participants.Single().Kills); Equal(180, result.DurationSeconds);
+    var result = LolStatsProvider.ParseMatch(json.RootElement); True(result.Remake); Equal(24, result.Participants.Single().Cs); Equal(0, result.Participants.Single().Kills); Equal(321, result.Participants.Single().SummonerLevel); Equal(180, result.DurationSeconds);
 }
 
 }

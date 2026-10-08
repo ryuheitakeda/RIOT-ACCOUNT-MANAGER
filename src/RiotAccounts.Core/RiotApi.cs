@@ -204,11 +204,6 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         cache.MatchesUpdatedAt = now;
         cache.QueueUpdatedAt[queue] = now;
         store.SaveCache(account.Id, cache);
-        if (!definition.IsRanked)
-        {
-            progress.Report($"ノーマルの戦績を更新しました（{fetched}/{count}戦）。");
-            return;
-        }
         var recent = Analytics.Recent(cache, profile.Puuid!, queue, int.MaxValue)
             .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(Analytics.ForecastMatches);
         var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
@@ -218,7 +213,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             cancellationToken.ThrowIfCancellationRequested();
             var puuid = opponents[i];
             now = DateTimeOffset.UtcNow;
-            if (cache.Opponents.Any(o => o.Puuid == puuid && o.QueueType == queue && o.ObservedAt >= now - Analytics.OpponentRankTtl && o.ObservedAt <= now)) continue;
+            if (Analytics.ReferenceQueues(queue).All(reference => cache.Opponents.Any(o => o.Puuid == puuid && o.QueueType == reference && o.ObservedAt >= now - Analytics.OpponentRankTtl && o.ObservedAt <= now))) continue;
             progress.Report($"対戦相手の現在ランクを取得中 {i + 1}/{opponents.Count}");
             List<RankEntry> ranks;
             try { ranks = await Ranks(profile.Platform, puuid, cancellationToken, progress); }
@@ -232,7 +227,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         cancellationToken.ThrowIfCancellationRequested();
         cache.Forecasts.Add(Analytics.Predict(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow));
         store.SaveCache(account.Id, cache);
-        progress.Report("戦績・分析を更新しました。");
+        progress.Report($"戦績・分析を更新しました（{fetched}/{count}戦）。");
     }
 
     private sealed class MatchHistory(int queueId)
@@ -323,7 +318,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         var info = root.GetProperty("info");
         var participants = info.GetProperty("participants").EnumerateArray().Select(p => new Participant(
             Str(p, "puuid"), Num(p, "teamId"), Str(p, "championName"), Str(p, "teamPosition"), Num(p, "kills"), Num(p, "deaths"), Num(p, "assists"),
-            Num(p, "totalMinionsKilled") + Num(p, "neutralMinionsKilled"), Num(p, "visionScore"), Bool(p, "win"))).ToList();
+            Num(p, "totalMinionsKilled") + Num(p, "neutralMinionsKilled"), Num(p, "visionScore"), Bool(p, "win"), Num(p, "summonerLevel"))).ToList();
         var duration = Num(info, "gameDuration");
         var early = info.GetProperty("participants").EnumerateArray().Any(p => Bool(p, "gameEndedInEarlySurrender"));
         return new(Str(root.GetProperty("metadata"), "matchId"), Num(info, "queueId"),

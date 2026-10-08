@@ -17,7 +17,8 @@ public sealed record RankEntry(string QueueType, string Tier, string Rank, int L
     [JsonIgnore] public string Record => $"{Wins}勝 {Losses}敗  /  {(Wins + Losses == 0 ? 0 : 100.0 * Wins / (Wins + Losses)):F1}%";
 }
 public sealed record RankSnapshot(DateTimeOffset ObservedAt, List<RankEntry> Entries);
-public sealed record Participant(string Puuid, int TeamId, string Champion, string Role, int Kills, int Deaths, int Assists, int Cs, int VisionScore, bool Win);
+// SummonerLevel is 0 when the source did not provide it (OP.GG, caches saved before it was recorded).
+public sealed record Participant(string Puuid, int TeamId, string Champion, string Role, int Kills, int Deaths, int Assists, int Cs, int VisionScore, bool Win, int SummonerLevel = 0);
 public sealed record MatchRecord(string Id, int QueueId, DateTimeOffset StartedAt, int DurationSeconds, bool Remake, List<Participant> Participants);
 public sealed record OpponentRankObservation(string Puuid, string QueueType, DateTimeOffset ObservedAt, RankEntry? Rank);
 public sealed record Forecast(string QueueType, DateTimeOffset CreatedAt, int MatchCount, int KnownPlayers, int TotalPlayers, string? Lower, string? Median, string? Upper, string Explanation)
@@ -25,6 +26,8 @@ public sealed record Forecast(string QueueType, DateTimeOffset CreatedAt, int Ma
     [JsonIgnore] public double MissingRate => TotalPlayers == 0 ? 1 : 1 - KnownPlayers / (double)TotalPlayers;
     public DateTimeOffset? OldestRankObservedAt { get; init; }
     public DateTimeOffset? LatestRankObservedAt { get; init; }
+    // How many of KnownPlayers were unranked opponents whose rank was estimated from their summoner level (normal games only).
+    public int EstimatedPlayers { get; init; }
 }
 public sealed class AccountCache
 {

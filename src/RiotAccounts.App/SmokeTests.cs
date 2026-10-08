@@ -257,7 +257,8 @@ internal static class SmokeTests
             store.Write("cache", account.Id.ToString(), new AccountCache
             {
                 Ranks = [new(now, [new(Queues.Solo, "GOLD", "IV", 25, 3, 2), new(Queues.Flex, "SILVER", "II", 60, 2, 4)])],
-                Forecasts = [new(Queues.Solo, now, 10, 40, 50, "GOLD IV", "GOLD II", "PLATINUM IV", "ダミーのランク予測")],
+                Forecasts = [new(Queues.Solo, now, 10, 40, 50, "GOLD IV", "GOLD II", "PLATINUM IV", "ダミーのランク予測"),
+                    new(Queues.Normal, now, 10, 42, 50, "SILVER I", "GOLD IV", "GOLD II", "ダミーのノーマル予測") { EstimatedPlayers = 7 }],
                 QueueUpdatedAt = new() { [Queues.Normal] = now, [Queues.Solo] = now, [Queues.Flex] = now },
                 Matches = [.. normalMatches,
                     new("dummy-ranked-solo", 420, now.AddMinutes(-10), 1800, false, [new(puuid, 100, "Caitlyn", "BOTTOM", 2, 5, 3, 150, 10, false)]),
@@ -286,6 +287,8 @@ internal static class SmokeTests
             Require(Control<TextBlock>("NormalModeText").Visibility == Visibility.Collapsed);
             Require(Control<TextBlock>("RankTitle").Text.Contains("GOLD IV", StringComparison.Ordinal));
             Require(matches.Items.Count == 1 && Cell(matches.Items[0], "Champion") == "Caitlyn");
+            Require(Control<TextBlock>("ForecastRange").Text.Contains("PLATINUM IV", StringComparison.Ordinal));
+            Require(!Control<TextBlock>("ForecastTitle").Text.Contains("Solo/Duo", StringComparison.Ordinal));
             Require(Control<ListBox>("HistoryList").Items.Count == 1);
 
             queuePicker.SelectedItem = Queues.Definitions.Single(queue => queue.Key == Queues.Flex);
@@ -309,10 +312,14 @@ internal static class SmokeTests
             void VerifyNormal()
             {
                 Require(Control<FrameworkElement>("RankedSummaryPanel").Visibility == Visibility.Collapsed);
-                Require(Control<FrameworkElement>("ForecastPanel").Visibility == Visibility.Collapsed);
+                Require(Control<FrameworkElement>("ForecastPanel").Visibility == Visibility.Visible);
+                Require(Control<TextBlock>("ForecastTitle").Text.Contains("Solo/Duo", StringComparison.Ordinal));
+                var range = Control<TextBlock>("ForecastRange").Text;
+                Require(range.Contains("SILVER I", StringComparison.Ordinal) && !range.Contains("PLATINUM IV", StringComparison.Ordinal));
+                Require(Control<TextBlock>("ForecastDetails").Text.Contains("レベル推定 7件", StringComparison.Ordinal));
                 Require(history.Visibility == Visibility.Collapsed);
                 Require(Control<TextBlock>("NormalModeText").Visibility == Visibility.Visible);
-                foreach (var name in new[] { "RankTitle", "RankRecord", "RankTime", "ForecastRange", "ForecastDetails" })
+                foreach (var name in new[] { "RankTitle", "RankRecord", "RankTime" })
                     Require(string.IsNullOrEmpty(Control<TextBlock>(name).Text));
                 Require(Control<ListBox>("HistoryList").Items.Count == 0);
                 Require(matches.Items.Count == 4);
