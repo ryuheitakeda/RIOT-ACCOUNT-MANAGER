@@ -96,13 +96,15 @@ public static class Analytics
 
     // Forecast window: the minimum match count the forecast needs, so opponent rank lookups stay at most 10 x 5.
     public const int ForecastMatches = 10;
+    // One league lookup returns every ranked queue, so an observation is reused by all queues' refreshes for this long.
+    public static readonly TimeSpan OpponentRankTtl = TimeSpan.FromDays(3);
 
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
     {
         if (!Queues.IsRanked(queue)) throw new ArgumentException("参考ランク帯はランク戦のみ対応しています。", nameof(queue));
         var matches = Recent(cache, puuid, queue, int.MaxValue)
             .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(ForecastMatches).ToList();
-        var observations = cache.Opponents.Where(o => o.QueueType == queue && o.ObservedAt <= now && o.ObservedAt >= now.AddHours(-24))
+        var observations = cache.Opponents.Where(o => o.QueueType == queue && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
             .GroupBy(o => o.Puuid).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
         var values = new List<int>();
         var observedAt = new List<DateTimeOffset>();

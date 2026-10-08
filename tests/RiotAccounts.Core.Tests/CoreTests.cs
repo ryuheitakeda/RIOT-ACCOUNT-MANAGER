@@ -103,9 +103,10 @@ public void Observations()
     var cache = Sample();
     var first = cache.Opponents[0];
     cache.Opponents.Add(first with { ObservedAt = Now(), Rank = null });
-    cache.Opponents[1] = cache.Opponents[1] with { ObservedAt = Now().AddHours(-25) };
+    cache.Opponents[1] = cache.Opponents[1] with { ObservedAt = Now() - Analytics.OpponentRankTtl - TimeSpan.FromMinutes(1) };
     cache.Opponents[2] = cache.Opponents[2] with { Rank = Rank(queue: Queues.Flex) };
     cache.Opponents[3] = cache.Opponents[3] with { ObservedAt = Now().AddMinutes(1) };
+    cache.Opponents[4] = cache.Opponents[4] with { ObservedAt = Now() - Analytics.OpponentRankTtl + TimeSpan.FromMinutes(1) };
     Equal(46, Analytics.Predict(cache, "self", Queues.Solo, Now()).KnownPlayers);
 }
 [Fact]
@@ -363,9 +364,49 @@ public async Task MissingOpponentApi()
     });
     using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
     await new LolStatsProvider(fixture.Store, api).RefreshAnalysisAsync(account, Queues.Solo, 20, new InlineProgress(_ => { }), default);
-    var cache = fixture.Store.Cache(account.Id); Equal(5, cache.Opponents.Count); Equal(0, cache.Forecasts.Single().KnownPlayers);
+    var cache = fixture.Store.Cache(account.Id); Equal(10, cache.Opponents.Count); Equal(0, cache.Forecasts.Single().KnownPlayers);
+    foreach (var queue in Queues.Ranked) Equal(5, cache.Opponents.Count(o => o.QueueType == queue && o.Rank == null));
     Equal(1, cache.QueueUpdatedAt.Count); True(cache.QueueUpdatedAt.ContainsKey(Queues.Solo));
     Equal(2, cache.Ranks.Single().Entries.Count);
+}
+[Fact]
+public async Task OpponentRanksSharedAcrossQueues()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    var enemyLookups = 0;
+    static object ApiMatchIn(string id, int queueId) => new
+    {
+        metadata = new { matchId = id },
+        info = new { queueId, gameStartTimestamp = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds(), gameDuration = 1800,
+            participants = Match(0).Participants.Select(p => new { puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion, teamPosition = p.Role,
+                kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = 180, neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win }) }
+    };
+    using var handler = new Handler((request, _) =>
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        if (path.EndsWith("/by-puuid/self")) return Task.FromResult(Response(HttpStatusCode.OK, new[] { Rank(), Rank(queue: Queues.Flex) }));
+        if (path.Contains("/by-puuid/enemy")) { enemyLookups++; return Task.FromResult(Response(HttpStatusCode.OK, new[] { Rank(10), Rank(20, Queues.Flex) })); }
+        if (path.EndsWith("/ids")) return Task.FromResult(Response(HttpStatusCode.OK, new[] { request.RequestUri.Query.Contains("queue=440") ? "JP1_1" : "JP1_0" }));
+        if (path.EndsWith("/JP1_0")) return Task.FromResult(Response(HttpStatusCode.OK, ApiMatchIn("JP1_0", 420)));
+        if (path.EndsWith("/JP1_1")) return Task.FromResult(Response(HttpStatusCode.OK, ApiMatchIn("JP1_1", 440)));
+        return Task.FromResult(Response(HttpStatusCode.NotFound));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    var provider = new LolStatsProvider(fixture.Store, api);
+    await provider.RefreshAnalysisAsync(account, Queues.Solo, 20, new InlineProgress(_ => { }), default);
+    Equal(5, enemyLookups);
+    var cache = fixture.Store.Cache(account.Id); Equal(10, cache.Opponents.Count);
+    foreach (var queue in Queues.Ranked) Equal(5, cache.Opponents.Count(o => o.QueueType == queue && o.Rank?.QueueType == queue));
+    // The Flex refresh meets the same five opponents and reuses the Solo refresh's lookups.
+    await provider.RefreshAnalysisAsync(account, Queues.Flex, 20, new InlineProgress(_ => { }), default);
+    Equal(5, enemyLookups);
+    cache = fixture.Store.Cache(account.Id); Equal(10, cache.Opponents.Count);
+    var flex = cache.Forecasts.Single(f => f.QueueType == Queues.Flex); Equal(1, flex.MatchCount); Equal(5, flex.KnownPlayers); Equal(5, flex.TotalPlayers);
+    // Past the retention period the ranks are looked up again.
+    cache.Opponents = cache.Opponents.Select(o => o with { ObservedAt = o.ObservedAt - Analytics.OpponentRankTtl - TimeSpan.FromMinutes(1) }).ToList();
+    fixture.Store.SaveCache(account.Id, cache);
+    await provider.RefreshAnalysisAsync(account, Queues.Flex, 20, new InlineProgress(_ => { }), default);
+    Equal(10, enemyLookups); Equal(20, fixture.Store.Cache(account.Id).Opponents.Count);
 }
 [Fact]
 public async Task PartialCancellation()
