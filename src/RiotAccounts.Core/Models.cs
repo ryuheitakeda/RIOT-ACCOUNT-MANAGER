@@ -56,6 +56,7 @@ public static class Queues
         new QueueDefinition(Flex, "Flex", Array.AsReadOnly(new[] { 440 }), true),
         new QueueDefinition(Normal, "ノーマル", Array.AsReadOnly(new[] { 400, 430, 480, 490 }), false)
     });
+    public static readonly IReadOnlyList<string> Ranked = Definitions.Where(q => q.IsRanked).Select(q => q.Key).ToList().AsReadOnly();
     public static QueueDefinition Get(string queue) => Definitions.SingleOrDefault(q => q.Key == queue)
         ?? throw new ArgumentException("非対応のキューです。", nameof(queue));
     public static bool Includes(string queue, int queueId) => Get(queue).QueueIds.Contains(queueId);

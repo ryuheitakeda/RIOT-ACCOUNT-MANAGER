@@ -210,7 +210,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             return;
         }
         var recent = Analytics.Recent(cache, profile.Puuid!, queue, int.MaxValue)
-            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(20);
+            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(Analytics.ForecastMatches);
         var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
             .Select(p => p.Puuid).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
         for (var i = 0; i < opponents.Count; i++)
@@ -218,13 +218,15 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             cancellationToken.ThrowIfCancellationRequested();
             var puuid = opponents[i];
             now = DateTimeOffset.UtcNow;
-            if (cache.Opponents.Any(o => o.Puuid == puuid && o.QueueType == queue && o.ObservedAt >= now.AddHours(-24) && o.ObservedAt <= now)) continue;
+            if (cache.Opponents.Any(o => o.Puuid == puuid && o.QueueType == queue && o.ObservedAt >= now - Analytics.OpponentRankTtl && o.ObservedAt <= now)) continue;
             progress.Report($"対戦相手の現在ランクを取得中 {i + 1}/{opponents.Count}");
-            RankEntry? rank;
-            try { rank = (await Ranks(profile.Platform, puuid, cancellationToken, progress)).SingleOrDefault(e => e.QueueType == queue); }
-            catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { rank = null; }
+            List<RankEntry> ranks;
+            try { ranks = await Ranks(profile.Platform, puuid, cancellationToken, progress); }
+            catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { ranks = []; }
             cancellationToken.ThrowIfCancellationRequested();
-            cache.Opponents.Add(new(puuid, queue, DateTimeOffset.UtcNow, rank));
+            // The lookup returns every ranked queue, so record all of them and let the other queue's refresh reuse them.
+            var observedAt = DateTimeOffset.UtcNow;
+            foreach (var ranked in Queues.Ranked) cache.Opponents.Add(new(puuid, ranked, observedAt, ranks.SingleOrDefault(e => e.QueueType == ranked)));
             store.SaveCache(account.Id, cache);
         }
         cancellationToken.ThrowIfCancellationRequested();
