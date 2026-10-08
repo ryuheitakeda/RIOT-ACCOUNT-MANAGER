@@ -61,26 +61,26 @@ public partial class MainWindow:Window
         AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {(UsingOpgg?"OP.GG（非公式）":"Riot API")}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
         var ranked=Queues.Get(Queue).IsRanked;
         if(!ranked&&HistoryTab.IsSelected)DetailTabs.SelectedItem=OverviewTab;
-        RankedSummaryPanel.Visibility=ForecastPanel.Visibility=HistoryTab.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
+        RankedSummaryPanel.Visibility=HistoryTab.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
         NormalModeText.Visibility=ranked?Visibility.Collapsed:Visibility.Visible;
-        RefreshAnalysisButton.Content=ranked?"戦績・分析更新":"戦績更新";
         var cache=store.Cache(a.Id);var latest=cache.Ranks.LastOrDefault();var rank=latest?.Entries.FirstOrDefault(e=>e.QueueType==Queue);
         if(ranked)
         {
         RankTitle.Text=latest==null?"ランク情報を取得してください":rank?.Display??"UNRANKED";
         RankRecord.Text=rank?.Record??(latest==null?"「全ランク更新」または「戦績・分析更新」で取得します。":"このキューのランク情報はありません。");
         RankTime.Text=latest==null?"未取得":$"観測日時 {latest.ObservedAt.LocalDateTime:yyyy/MM/dd HH:mm}";
-        var forecast=cache.Forecasts.LastOrDefault(f=>f.QueueType==Queue);
-        ForecastRange.Text=forecast?.Lower==null?"データ不足":$"{forecast.Lower} 〜 {forecast.Upper}";
-        ForecastDetails.Text=forecast==null?"「戦績・分析更新」で相手ランクを取得します。直近30日の10戦以上が必要です。":$"{forecast.Explanation}\n{forecast.MatchCount}戦 / 相手 {forecast.KnownPlayers}/{forecast.TotalPlayers}件 / 欠測率 {(forecast.TotalPlayers==0?100:100.0*(forecast.TotalPlayers-forecast.KnownPlayers)/forecast.TotalPlayers):F1}%\n取得 {forecast.CreatedAt.LocalDateTime:yyyy/MM/dd HH:mm}"+(forecast.Median==null?"":$"\n中央値 {forecast.Median}");
-        if(forecast?.OldestRankObservedAt is{} oldest&&forecast.LatestRankObservedAt is{} newest)
-            ForecastDetails.Text+=$"\n相手ランク観測 {oldest.LocalDateTime:MM/dd HH:mm} 〜 {newest.LocalDateTime:MM/dd HH:mm}";
         }
         else
         {
-            RankTitle.Text=RankRecord.Text=RankTime.Text=ForecastRange.Text=ForecastDetails.Text="";
+            RankTitle.Text=RankRecord.Text=RankTime.Text="";
             HistoryList.ItemsSource=Array.Empty<string>();HistoryPlot.Plot.Clear();HistoryPlot.Refresh();
         }
+        ForecastTitle.Text=ranked?"次戦の参考ランク帯":"次戦の参考ランク帯（相手のSolo/Duoランク基準）";
+        var forecast=cache.Forecasts.LastOrDefault(f=>f.QueueType==Queue);
+        ForecastRange.Text=forecast?.Lower==null?"データ不足":$"{forecast.Lower} 〜 {forecast.Upper}";
+        ForecastDetails.Text=forecast==null?"「戦績・分析更新」で相手ランクを取得します。直近30日の10戦以上が必要です。":$"{forecast.Explanation}\n{forecast.MatchCount}戦 / 相手 {forecast.KnownPlayers}/{forecast.TotalPlayers}件 / 欠測率 {(forecast.TotalPlayers==0?100:100.0*(forecast.TotalPlayers-forecast.KnownPlayers)/forecast.TotalPlayers):F1}%{(forecast.EstimatedPlayers>0?$" / うちレベル推定 {forecast.EstimatedPlayers}件":"")}\n取得 {forecast.CreatedAt.LocalDateTime:yyyy/MM/dd HH:mm}"+(forecast.Median==null?"":$"\n中央値 {forecast.Median}");
+        if(forecast?.OldestRankObservedAt is{} oldest&&forecast.LatestRankObservedAt is{} newest)
+            ForecastDetails.Text+=$"\n相手ランク観測 {oldest.LocalDateTime:MM/dd HH:mm} 〜 {newest.LocalDateTime:MM/dd HH:mm}";
         var recent=Analytics.Recent(cache,a.Lol.Puuid??"",Queue,CountPicker.SelectedIndex==1?50:20);
         var summary=Analytics.Summarize(recent,a.Lol.Puuid??"",_=>"全体").FirstOrDefault();
         PerformanceText.Text=summary==null?"まだ戦績がありません。":$"{summary.Games}戦  {summary.Wins}勝 {summary.Games-summary.Wins}敗  /  勝率 {summary.WinRate:F1}%\nKDA {summary.Kda:F2}    CS/分 {summary.CsPerMinute:F1}    平均視界スコア {summary.VisionPerGame:F1}";

@@ -99,15 +99,21 @@ public static class Analytics
     // One league lookup returns every ranked queue, so an observation is reused by all queues' refreshes for this long.
     public static readonly TimeSpan OpponentRankTtl = TimeSpan.FromDays(3);
 
+    // Normal games have no rank of their own, so an opponent's Solo/Duo rank (or Flex when unranked there) stands in for it.
+    public static IReadOnlyList<string> ReferenceQueues(string queue) => Queues.IsRanked(queue) ? [queue] : Queues.Ranked;
+    // In normal games an unranked opponent is estimated from the ranked opponents with the nearest summoner levels.
+    public const int LevelNeighbours = 5;
+
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
     {
-        if (!Queues.IsRanked(queue)) throw new ArgumentException("参考ランク帯はランク戦のみ対応しています。", nameof(queue));
+        var ranked = Queues.IsRanked(queue);
+        var reference = ReferenceQueues(queue);
         var matches = Recent(cache, puuid, queue, int.MaxValue)
             .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(ForecastMatches).ToList();
-        var observations = cache.Opponents.Where(o => o.QueueType == queue && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
-            .GroupBy(o => o.Puuid).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
-        var values = new List<int>();
-        var observedAt = new List<DateTimeOffset>();
+        var observations = cache.Opponents.Where(o => reference.Contains(o.QueueType) && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
+            .GroupBy(o => (o.Puuid, o.QueueType)).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
+        var known = new List<(int Order, int Level, DateTimeOffset ObservedAt)>();
+        var unranked = new List<(int Level, DateTimeOffset ObservedAt)>();
         var total = 0;
         foreach (var match in matches)
         {
@@ -115,21 +121,41 @@ public static class Analytics
             var enemies = match.Participants.Where(p => p.TeamId != team && !string.IsNullOrWhiteSpace(p.Puuid)).DistinctBy(p => p.Puuid).ToList();
             total += 5; // Missing participants must count as missing, not improve coverage.
             foreach (var enemy in enemies.Take(5))
-                if (observations.TryGetValue(enemy.Puuid, out var observed) && observed.Rank?.QueueType == queue && observed.Rank.Order is int order)
-                {
-                    values.Add(order);
-                    observedAt.Add(observed.ObservedAt);
-                }
+            {
+                var observed = reference.Select(q => observations.GetValueOrDefault((enemy.Puuid, q))).ToList();
+                if (observed.FirstOrDefault(o => o?.Rank is { } rank && rank.QueueType == o.QueueType && rank.Order != null) is { } found)
+                    known.Add((found.Rank!.Order!.Value, enemy.SummonerLevel, found.ObservedAt));
+                // Only an opponent looked up in every reference queue is known to be unranked; a missing lookup stays missing.
+                else if (!ranked && enemy.SummonerLevel > 0 && observed.All(o => o != null))
+                    unranked.Add((enemy.SummonerLevel, observed.Max(o => o!.ObservedAt)));
+            }
         }
+        var values = known.Select(k => k.Order).ToList();
+        var observedAt = known.Select(k => k.ObservedAt).ToList();
+        var calibration = known.Where(k => k.Level > 0).ToList();
+        var estimated = 0;
+        if (calibration.Count >= LevelNeighbours)
+            foreach (var (level, at) in unranked)
+            {
+                var neighbours = calibration.OrderBy(k => Math.Abs(k.Level - level)).ThenBy(k => k.Level).Take(LevelNeighbours).Select(k => k.Order).Order().ToList();
+                values.Add(neighbours[(neighbours.Count - 1) / 2]);
+                observedAt.Add(at);
+                estimated++;
+            }
+        var basis = ranked ? "過去の対戦相手の現在ランク" : "過去の対戦相手のSolo/Duo（なければFlex）の現在ランク";
         if (matches.Count < 10 || total == 0 || values.Count * 1.0 / total < .8)
-            return new(queue, now, matches.Count, values.Count, total, null, null, null, "データ不足：直近30日で10戦以上・相手ランク取得率80%以上が必要です。");
+            return new(queue, now, matches.Count, values.Count, total, null, null, null,
+                ranked ? "データ不足：直近30日で10戦以上・相手ランク取得率80%以上が必要です。" : "データ不足：直近30日で10戦以上・相手ランク取得率（レベル推定を含む）80%以上が必要です。")
+            { EstimatedPlayers = estimated };
         values.Sort();
         string Quantile(double p) => RankOrder.Label(values[(int)Math.Ceiling(p * values.Count) - 1]);
+        var method = ranked ? "" : $"未ランクの相手は、同じ対象試合に出たランク持ちの相手のうちサモナーレベルが近い{LevelNeighbours}人のランク中央値で推定します。";
         return new(queue, now, matches.Count, values.Count, total, Quantile(.25), Quantile(.5), Quantile(.75),
-            "過去の対戦相手の現在ランクの中央50%です。同じ相手も対戦ごとに1件とし、分位点は順位カテゴリのnearest-rank法で計算します。次戦の保証・内部MMRではありません。")
+            $"{basis}の中央50%です。{method}同じ相手も対戦ごとに1件とし、分位点は順位カテゴリのnearest-rank法で計算します。次戦の保証・内部MMRではありません。")
         {
             OldestRankObservedAt = observedAt.Min(),
-            LatestRankObservedAt = observedAt.Max()
+            LatestRankObservedAt = observedAt.Max(),
+            EstimatedPlayers = estimated
         };
     }
 }

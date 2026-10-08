@@ -26,7 +26,7 @@ public sealed class NormalMatchesTests
             {
                 puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion, teamPosition = p.Role,
                 kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = p.Cs,
-                neutralMinionsKilled = 0, visionScore = p.VisionScore, win = p.Win, gameEndedInEarlySurrender = match.Remake
+                neutralMinionsKilled = 0, visionScore = p.VisionScore, win = p.Win, gameEndedInEarlySurrender = match.Remake, summonerLevel = p.SummonerLevel
             })
         }
     };
@@ -57,7 +57,7 @@ public sealed class NormalMatchesTests
     }
 
     [Fact]
-    public void NormalDefinitionAndForecastGuard()
+    public void NormalDefinition()
     {
         Assert.Equal(new[] { 400, 430, 480, 490 }, Queues.Get(Queues.Normal).QueueIds);
         Assert.False(Queues.IsRanked(Queues.Normal));
@@ -68,7 +68,7 @@ public sealed class NormalMatchesTests
         Assert.False(Queues.Includes(Queues.Normal, 450));
         Assert.All(Queues.Get(Queues.Normal).QueueIds, id => Assert.DoesNotContain("キュー ", Queues.MatchName(id)));
         Assert.Throws<ArgumentException>(() => Queues.Id(Queues.Normal));
-        Assert.Throws<ArgumentException>(() => Analytics.Predict(new(), "self", Queues.Normal, Now));
+        Assert.Null(Analytics.Predict(new(), "self", Queues.Normal, Now).Median);
         Assert.Throws<ArgumentException>(() => Analytics.Recent(new(), "self", "unknown", 20));
     }
 
@@ -115,7 +115,8 @@ public sealed class NormalMatchesTests
         var cache = fixture.Store.Cache(account.Id);
         Assert.Equal(matches.Where(m => !m.Remake).Take(count).Select(m => m.Id), Analytics.Recent(cache, "self", Queues.Normal, count).Select(m => m.Id));
         Assert.Equal(rank, Assert.Single(Assert.Single(cache.Ranks).Entries));
-        Assert.Equal(old.Opponents, cache.Opponents); Assert.Equal(old.Forecasts, cache.Forecasts);
+        Assert.Equal(old.Opponents, cache.Opponents); Assert.Equal(old.Forecasts, cache.Forecasts.Where(f => f.QueueType == Queues.Solo));
+        var forecast = Assert.Single(cache.Forecasts, f => f.QueueType == Queues.Normal); Assert.Null(forecast.Median); Assert.Equal(0, forecast.KnownPlayers);
         Assert.Equal(Now, cache.QueueUpdatedAt[Queues.Solo]);
         Assert.Equal(cache.MatchesUpdatedAt, cache.QueueUpdatedAt[Queues.Normal]);
         Assert.Single(Analytics.Recent(cache, "self", Queues.Solo, count));
@@ -170,7 +171,7 @@ public sealed class NormalMatchesTests
         var saved = Assert.Single(fixture.Store.Accounts());
         Assert.Equal("self", saved.Lol.Puuid); Assert.Equal(2, saved.Profiles.Count);
         var cache = fixture.Store.Cache(account.Id);
-        Assert.Empty(cache.Ranks); Assert.Empty(cache.Opponents); Assert.Empty(cache.Forecasts);
+        Assert.Empty(cache.Ranks); Assert.Empty(cache.Opponents); Assert.Equal(Queues.Normal, Assert.Single(cache.Forecasts).QueueType);
         Assert.Contains(Queues.Normal, cache.QueueUpdatedAt.Keys);
     }
 
