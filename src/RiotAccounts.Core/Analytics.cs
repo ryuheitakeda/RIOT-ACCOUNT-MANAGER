@@ -126,13 +126,53 @@ public static class Analytics
     }
 
     // calibrationSources: the caches whose opponents calibrate the level estimate (all accounts in the app); defaults to this cache.
+    // The latest in-TTL observation per (player, queue) for the given ranked queues.
+    private static Dictionary<(string Puuid, string QueueType), OpponentRankObservation> CurrentObservations(AccountCache cache, IReadOnlyList<string> queues, DateTimeOffset now) =>
+        cache.Opponents.Where(o => queues.Contains(o.QueueType) && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
+            .GroupBy(o => (o.Puuid, o.QueueType)).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
+
+    // The rank median of the LevelNeighbours calibration players with the nearest summoner levels; null when calibration is too small.
+    private static int? EstimateFromLevel(IReadOnlyList<(int Level, int Order)> calibration, int level)
+    {
+        if (calibration.Count < LevelNeighbours) return null;
+        var neighbours = calibration.OrderBy(k => Math.Abs(k.Level - level)).ThenBy(k => k.Level).Take(LevelNeighbours).Select(k => k.Order).Order().ToList();
+        return neighbours[(neighbours.Count - 1) / 2];
+    }
+
+    // A match's average tier needs a rank (or level estimate) for at least this many of its 10 participants.
+    public const int AverageTierMinPlayers = 8;
+
+    // The mean of every participant's current Solo/Duo rank (Flex when unranked there), self included, as OP.GG averages the whole lobby.
+    // Self comes from the account's latest in-TTL rank snapshot. Unranked participants known in both queues are estimated
+    // from their summoner level; null when too few ranks are known.
+    public static MatchAverageTier? AverageTier(MatchRecord match, string puuid, AccountCache cache, DateTimeOffset now, IReadOnlyList<(int Level, int Order)> calibration)
+    {
+        var observations = CurrentObservations(cache, Queues.Ranked, now);
+        if (cache.Ranks.Where(s => s.ObservedAt <= now && s.ObservedAt >= now - OpponentRankTtl).MaxBy(s => s.ObservedAt) is { } own)
+            foreach (var queue in Queues.Ranked)
+                observations[(puuid, queue)] = new(puuid, queue, own.ObservedAt, own.Entries.FirstOrDefault(e => e.QueueType == queue));
+        var values = new List<int>();
+        var estimated = 0;
+        foreach (var player in match.Participants.Where(p => !string.IsNullOrWhiteSpace(p.Puuid)).DistinctBy(p => p.Puuid))
+        {
+            var observed = Queues.Ranked.Select(q => observations.GetValueOrDefault((player.Puuid, q))).ToList();
+            if (observed.FirstOrDefault(o => o?.Rank is { } rank && rank.QueueType == o.QueueType && rank.Order != null) is { } found)
+                values.Add(found.Rank!.Order!.Value);
+            else if (player.SummonerLevel > 0 && observed.All(o => o != null) && EstimateFromLevel(calibration, player.SummonerLevel) is { } guess)
+            {
+                values.Add(guess);
+                estimated++;
+            }
+        }
+        return values.Count < AverageTierMinPlayers ? null : new(values.Average(), MatchAverageTier.Riot, now, values.Count, estimated);
+    }
+
     public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now, IEnumerable<AccountCache>? calibrationSources = null)
     {
         var ranked = Queues.IsRanked(queue);
         var reference = ReferenceQueues(queue);
         var matches = ForecastWindow(cache, puuid, queue, now);
-        var observations = cache.Opponents.Where(o => reference.Contains(o.QueueType) && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
-            .GroupBy(o => (o.Puuid, o.QueueType)).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
+        var observations = CurrentObservations(cache, reference, now);
         var known = new List<(int Order, int Level, DateTimeOffset ObservedAt)>();
         var unranked = new List<(int Level, DateTimeOffset ObservedAt)>();
         var total = 0;
@@ -155,11 +195,10 @@ public static class Analytics
         var observedAt = known.Select(k => k.ObservedAt).ToList();
         var estimated = 0;
         var calibration = ranked || unranked.Count == 0 ? [] : LevelCalibration(calibrationSources ?? [cache], now);
-        if (calibration.Count >= LevelNeighbours)
-            foreach (var (level, at) in unranked)
+        foreach (var (level, at) in unranked)
+            if (EstimateFromLevel(calibration, level) is { } guess)
             {
-                var neighbours = calibration.OrderBy(k => Math.Abs(k.Level - level)).ThenBy(k => k.Level).Take(LevelNeighbours).Select(k => k.Order).Order().ToList();
-                values.Add(neighbours[(neighbours.Count - 1) / 2]);
+                values.Add(guess);
                 observedAt.Add(at);
                 estimated++;
             }

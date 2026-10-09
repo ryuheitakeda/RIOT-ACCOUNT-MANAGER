@@ -23,6 +23,15 @@ public sealed record MatchRecord(string Id, int QueueId, DateTimeOffset StartedA
 {
     // False for Riot API details saved before summoner levels were recorded; such matches are fetched again once.
     public bool LevelsRecorded { get; init; }
+    public MatchAverageTier? AverageTier { get; init; }
+}
+// A match's average participant rank on the RankOrder scale. It is recorded once and never rewritten, so it stays an observation.
+// OP.GG: OP.GG's own value, ObservedAt = match start. Riot: the participants' ranks at ObservedAt (not at match time).
+public sealed record MatchAverageTier(double Order, string Source, DateTimeOffset ObservedAt, int KnownPlayers = 0, int EstimatedPlayers = 0)
+{
+    public const string Opgg = "opgg";
+    public const string Riot = "riot";
+    [JsonIgnore] public string Label => RankOrder.Label((int)Math.Round(Order, MidpointRounding.AwayFromZero));
 }
 public sealed record OpponentRankObservation(string Puuid, string QueueType, DateTimeOffset ObservedAt, RankEntry? Rank);
 public sealed record Forecast(string QueueType, DateTimeOffset CreatedAt, int MatchCount, int KnownPlayers, int TotalPlayers, string? Lower, string? Median, string? Upper, string Explanation)

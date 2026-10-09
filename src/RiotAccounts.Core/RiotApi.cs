@@ -206,7 +206,9 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         store.SaveCache(account.Id, cache);
         if (!definition.IsRanked) await BackfillLevels(account, cache, queue, progress, cancellationToken);
         var recent = Analytics.ForecastWindow(cache, profile.Puuid!, queue, now);
-        var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
+        // Ranked forecasts need only the enemies; normal games also look up allies for each match's average tier.
+        // Self is never looked up here: a normal refresh does not fetch the account's own rank (the average uses the saved rank snapshots).
+        var opponents = recent.SelectMany(m => m.Participants.Where(p => definition.IsRanked ? p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId : p.Puuid != profile.Puuid))
             .Select(p => p.Puuid).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
         for (var i = 0; i < opponents.Count; i++)
         {
@@ -214,7 +216,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             var puuid = opponents[i];
             now = DateTimeOffset.UtcNow;
             if (Analytics.ReferenceQueues(queue).All(reference => cache.Opponents.Any(o => o.Puuid == puuid && o.QueueType == reference && o.ObservedAt >= now - Analytics.OpponentRankTtl && o.ObservedAt <= now))) continue;
-            progress.Report($"対戦相手の現在ランクを取得中 {i + 1}/{opponents.Count}");
+            progress.Report($"{(definition.IsRanked ? "対戦相手" : "参加者")}の現在ランクを取得中 {i + 1}/{opponents.Count}");
             List<RankEntry> ranks;
             try { ranks = await Ranks(profile.Platform, puuid, cancellationToken, progress); }
             catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { ranks = []; }
@@ -226,9 +228,21 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         }
         cancellationToken.ThrowIfCancellationRequested();
         var sources = store.Accounts().Select(a => a.Id == account.Id ? cache : store.Cache(a.Id)).ToList();
+        if (!definition.IsRanked) RecordAverageTiers(cache, profile.Puuid!, recent, sources);
         cache.Forecasts.Add(Analytics.Predict(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow, sources));
         store.SaveCache(account.Id, cache);
         progress.Report($"戦績・分析を更新しました（{fetched}/{count}戦）。");
+    }
+
+    // Records the average tier of each window match that has none yet; a match whose lookups are too sparse is retried next refresh.
+    private static void RecordAverageTiers(AccountCache cache, string puuid, List<MatchRecord> window, IEnumerable<AccountCache> sources)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var ids = window.Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
+        var calibration = Analytics.LevelCalibration(sources, now);
+        for (var i = 0; i < cache.Matches.Count; i++)
+            if (cache.Matches[i].AverageTier == null && ids.Contains(cache.Matches[i].Id) && Analytics.AverageTier(cache.Matches[i], puuid, cache, now, calibration) is { } average)
+                cache.Matches[i] = cache.Matches[i] with { AverageTier = average };
     }
 
     // Fetches the forecast window's Riot API matches saved before summoner levels were recorded, once each, so unranked opponents can be estimated.
@@ -254,7 +268,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
                 throw new RiotApiException("試合のアカウントまたはキューが一致しません。保存済みデータを表示しています。");
             ct.ThrowIfCancellationRequested();
             for (var j = 0; j < cache.Matches.Count; j++)
-                if (cache.Matches[j].Id == old.Id) cache.Matches[j] = match;
+                if (cache.Matches[j].Id == old.Id) cache.Matches[j] = match with { AverageTier = cache.Matches[j].AverageTier };
             store.SaveCache(account.Id, cache);
         }
     }

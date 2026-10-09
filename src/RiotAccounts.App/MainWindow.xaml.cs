@@ -60,8 +60,7 @@ public partial class MainWindow:Window
         AccountTitle.Text=a.Label;AccountNote.Text=a.Note??"";AccountNote.Visibility=a.Note==null?Visibility.Collapsed:Visibility.Visible;var seen=store.Cache(a.Id);var last=new[]{seen.Ranks.LastOrDefault()?.ObservedAt,seen.MatchesUpdatedAt}.Max();
         AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {(UsingOpgg?"OP.GG（非公式）":"Riot API")}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
         var ranked=Queues.Get(Queue).IsRanked;
-        if(!ranked&&HistoryTab.IsSelected)DetailTabs.SelectedItem=OverviewTab;
-        RankedSummaryPanel.Visibility=HistoryTab.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
+        RankedSummaryPanel.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
         NormalModeText.Visibility=ranked?Visibility.Collapsed:Visibility.Visible;
         var cache=store.Cache(a.Id);var latest=cache.Ranks.LastOrDefault();var rank=latest?.Entries.FirstOrDefault(e=>e.QueueType==Queue);
         if(ranked)
@@ -73,7 +72,6 @@ public partial class MainWindow:Window
         else
         {
             RankTitle.Text=RankRecord.Text=RankTime.Text="";
-            HistoryList.ItemsSource=Array.Empty<string>();HistoryPlot.Plot.Clear();HistoryPlot.Refresh();
         }
         ForecastTitle.Text=ranked?"次戦の参考ランク帯":"次戦の参考ランク帯（相手のSolo/Duoランク基準）";
         var forecast=cache.Forecasts.LastOrDefault(f=>f.QueueType==Queue);
@@ -88,7 +86,7 @@ public partial class MainWindow:Window
         MatchesGrid.ItemsSource=recent.Select(m=>{var p=m.Participants.Single(p=>p.Puuid==a.Lol.Puuid);return new MatchRow(m,m.StartedAt.LocalDateTime.ToString("MM/dd HH:mm"),Queues.MatchName(m.QueueId),p.Win?"勝利":"敗北",p.Champion,$"{p.Kills} / {p.Deaths} / {p.Assists}",(p.Cs/(m.DurationSeconds/60.0)).ToString("F1"));}).ToList();
         ChampionStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>p.Champion);
         RoleStats.ItemsSource=Analytics.Summarize(recent,a.Lol.Puuid??"",p=>string.IsNullOrEmpty(p.Role)?"不明":p.Role);
-        if(ranked)DrawHistory(cache);
+        if(ranked)DrawHistory(cache);else DrawAverageTiers(cache,a.Lol.Puuid??"");
         if(AnalysisTab.IsSelected)RenderCrossAccount();
     }
     // Reads every account's cache, so it runs only while the analysis tab is shown.
@@ -105,7 +103,8 @@ public partial class MainWindow:Window
     }
     private void DrawHistory(AccountCache cache)
     {
-        HistoryPlot.Plot.Clear();
+        HistoryNote.Text="更新した時点のLPを記録します。ランク変更をまたぐ線は接続しません。";
+        HistoryPlot.Plot.Clear();HistoryPlot.Plot.Axes.Left.TickGenerator=new ScottPlot.TickGenerators.NumericAutomatic();
         var points=cache.Ranks.Select(s=>(At:s.ObservedAt,Rank:s.Entries.FirstOrDefault(r=>r.QueueType==Queue))).ToList();
         var dates=new List<DateTime>();var values=new List<double>();string? current=null;
         void Flush(){if(dates.Count>0){var line=HistoryPlot.Plot.Add.Scatter(dates.ToArray(),values.ToArray());line.LegendText=current??"";line.MarkerSize=5;}dates.Clear();values.Clear();}
@@ -122,6 +121,30 @@ public partial class MainWindow:Window
             var after=p.Rank?.Order;
             var change=before.HasValue&&after.HasValue&&before!=after?(after>before?"  ↑ 昇格":"  ↓ 降格"):"";
             return $"{p.At.LocalDateTime:yyyy/MM/dd HH:mm}   {p.Rank?.Display??"UNRANKED"}{change}";
+        }).Reverse().ToList();
+    }
+    // Normal games have no rank of their own, so the history shows each match's lobby average tier instead of LP.
+    private void DrawAverageTiers(AccountCache cache,string puuid)
+    {
+        HistoryNote.Text="ノーマル戦の試合ごとの平均ティア（参加者10人のランクの平均）です。OP.GGの値はOP.GGの算出値、Riot APIの値は取得時点のSolo/Duo（なければFlex）ランクの平均で、未ランクの参加者はサモナーレベルから推定します。Riot APIでは「戦績・分析更新」のたびに直近10戦を算出し、一度記録した値は更新しません。";
+        HistoryPlot.Plot.Clear();
+        var matches=Analytics.Recent(cache,puuid,Queue,int.MaxValue).Where(m=>m.AverageTier!=null).OrderBy(m=>m.StartedAt).ToList();
+        if(matches.Count>0)
+        {
+            var values=matches.Select(m=>m.AverageTier!.Order).ToArray();
+            var line=HistoryPlot.Plot.Add.Scatter(matches.Select(m=>m.StartedAt.LocalDateTime).ToArray(),values);line.MarkerSize=5;
+            var low=Math.Max(0,(int)Math.Floor(values.Min())-1);var high=Math.Min(30,(int)Math.Ceiling(values.Max())+1);
+            var step=high-low>12?4:1;var ticks=new ScottPlot.TickGenerators.NumericManual();
+            for(var order=low;order<=high;order++)if(order%step==0||order>=28)ticks.AddMajor(order,RankOrder.Label(order));
+            HistoryPlot.Plot.Axes.Left.TickGenerator=ticks;
+            HistoryPlot.Plot.Axes.DateTimeTicksBottom();HistoryPlot.Plot.YLabel("");HistoryPlot.Plot.Axes.AutoScaleX();HistoryPlot.Plot.Axes.SetLimitsY(low-.5,high+.5);
+        }
+        HistoryPlot.Refresh();
+        HistoryList.ItemsSource=matches.Select(m=>
+        {
+            var tier=m.AverageTier!;var p=m.Participants.Single(p=>p.Puuid==puuid);
+            var source=tier.Source==MatchAverageTier.Opgg?"OP.GG":$"Riot API {tier.ObservedAt.LocalDateTime:MM/dd}時点・{tier.KnownPlayers}人{(tier.EstimatedPlayers>0?$"（うちレベル推定{tier.EstimatedPlayers}人）":"")}";
+            return $"{m.StartedAt.LocalDateTime:yyyy/MM/dd HH:mm}   {tier.Label}（{tier.Order:F1}）   {(p.Win?"勝利":"敗北")}   {p.Champion}   {source}";
         }).Reverse().ToList();
     }
     // Never switches the source by itself; only points at the diagnosis and the other source.
