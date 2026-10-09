@@ -204,8 +204,8 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         cache.MatchesUpdatedAt = now;
         cache.QueueUpdatedAt[queue] = now;
         store.SaveCache(account.Id, cache);
-        var recent = Analytics.Recent(cache, profile.Puuid!, queue, int.MaxValue)
-            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(Analytics.ForecastMatches);
+        if (!definition.IsRanked) await BackfillLevels(account, cache, queue, progress, cancellationToken);
+        var recent = Analytics.ForecastWindow(cache, profile.Puuid!, queue, now);
         var opponents = recent.SelectMany(m => m.Participants.Where(p => p.TeamId != m.Participants.Single(s => s.Puuid == profile.Puuid).TeamId))
             .Select(p => p.Puuid).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
         for (var i = 0; i < opponents.Count; i++)
@@ -225,9 +225,47 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
             store.SaveCache(account.Id, cache);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        cache.Forecasts.Add(Analytics.Predict(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow));
+        var sources = store.Accounts().Select(a => a.Id == account.Id ? cache : store.Cache(a.Id)).ToList();
+        cache.Forecasts.Add(Analytics.Predict(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow, sources));
         store.SaveCache(account.Id, cache);
         progress.Report($"戦績・分析を更新しました（{fetched}/{count}戦）。");
+    }
+
+    // Fetches the forecast window's Riot API matches saved before summoner levels were recorded, once each, so unranked opponents can be estimated.
+    private async Task BackfillLevels(RiotAccount account, AccountCache cache, string queue, IProgress<string> progress, CancellationToken ct)
+    {
+        var profile = account.Lol;
+        var host = Regions.Regional(profile.Platform);
+        var stale = Analytics.ForecastWindow(cache, profile.Puuid!, queue, DateTimeOffset.UtcNow)
+            .Where(m => !m.LevelsRecorded && !m.Id.StartsWith(OpggStatsProvider.MatchIdPrefix, StringComparison.Ordinal)).ToList();
+        for (var i = 0; i < stale.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var old = stale[i];
+            progress.Report($"過去の試合の対戦相手レベルを補完中 {i + 1}/{stale.Count}");
+            MatchRecord match;
+            try
+            {
+                using var json = await api.GetAsync<JsonDocument>(host, $"/lol/match/v5/matches/{Uri.EscapeDataString(old.Id)}", ct, progress);
+                match = ParseDetail(json);
+            }
+            catch (RiotApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { continue; }
+            if (match.Id != old.Id || match.QueueId != old.QueueId || match.Participants.Count(p => p.Puuid == profile.Puuid) != 1)
+                throw new RiotApiException("試合のアカウントまたはキューが一致しません。保存済みデータを表示しています。");
+            ct.ThrowIfCancellationRequested();
+            for (var j = 0; j < cache.Matches.Count; j++)
+                if (cache.Matches[j].Id == old.Id) cache.Matches[j] = match;
+            store.SaveCache(account.Id, cache);
+        }
+    }
+
+    private static MatchRecord ParseDetail(JsonDocument json)
+    {
+        try { return ParseMatch(json.RootElement); }
+        catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException or ArgumentOutOfRangeException or OverflowException)
+        {
+            throw new RiotApiException("試合データの形式が不正です。保存済みデータを表示しています。");
+        }
     }
 
     private sealed class MatchHistory(int queueId)
@@ -279,11 +317,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
                     progress.Report($"試合履歴を取得中（{++downloaded}件目）…");
                     using var json = await api.GetAsync<JsonDocument>(host,
                         $"/lol/match/v5/matches/{Uri.EscapeDataString(matchId)}", ct, progress);
-                    try { match = ParseMatch(json.RootElement); }
-                    catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException or ArgumentOutOfRangeException or OverflowException)
-                    {
-                        throw new RiotApiException("試合データの形式が不正です。保存済みデータを表示しています。");
-                    }
+                    match = ParseDetail(json);
                 }
                 if (match!.Id != matchId || match.QueueId != history.QueueId || match.Participants.Count(p => p.Puuid == profile.Puuid) != 1)
                     throw new RiotApiException("試合のアカウントまたはキューが一致しません。保存済みデータを表示しています。");
@@ -323,7 +357,7 @@ public sealed class LolStatsProvider(Store store, RiotApi api) : IGameStatsProvi
         var early = info.GetProperty("participants").EnumerateArray().Any(p => Bool(p, "gameEndedInEarlySurrender"));
         return new(Str(root.GetProperty("metadata"), "matchId"), Num(info, "queueId"),
             DateTimeOffset.FromUnixTimeMilliseconds(info.GetProperty("gameStartTimestamp").GetInt64()), duration,
-            early && duration < 300, participants);
+            early && duration < 300, participants) { LevelsRecorded = true };
     }
     private static string Str(JsonElement p, string key) => p.TryGetProperty(key, out var v) ? v.GetString() ?? "" : "";
     private static int Num(JsonElement p, string key) => p.TryGetProperty(key, out var v) ? v.GetInt32() : 0;

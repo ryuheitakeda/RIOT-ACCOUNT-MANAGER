@@ -19,7 +19,11 @@ public sealed record RankEntry(string QueueType, string Tier, string Rank, int L
 public sealed record RankSnapshot(DateTimeOffset ObservedAt, List<RankEntry> Entries);
 // SummonerLevel is 0 when the source did not provide it (OP.GG, caches saved before it was recorded).
 public sealed record Participant(string Puuid, int TeamId, string Champion, string Role, int Kills, int Deaths, int Assists, int Cs, int VisionScore, bool Win, int SummonerLevel = 0);
-public sealed record MatchRecord(string Id, int QueueId, DateTimeOffset StartedAt, int DurationSeconds, bool Remake, List<Participant> Participants);
+public sealed record MatchRecord(string Id, int QueueId, DateTimeOffset StartedAt, int DurationSeconds, bool Remake, List<Participant> Participants)
+{
+    // False for Riot API details saved before summoner levels were recorded; such matches are fetched again once.
+    public bool LevelsRecorded { get; init; }
+}
 public sealed record OpponentRankObservation(string Puuid, string QueueType, DateTimeOffset ObservedAt, RankEntry? Rank);
 public sealed record Forecast(string QueueType, DateTimeOffset CreatedAt, int MatchCount, int KnownPlayers, int TotalPlayers, string? Lower, string? Median, string? Upper, string Explanation)
 {

@@ -146,7 +146,7 @@ public sealed class NormalMatchesTests
     {
         using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
         var matches = new List<MatchRecord> { Match(0), Match(1, 490), Match(2, 480, true) };
-        fixture.Store.SaveCache(account.Id, new() { Matches = [matches[0]] });
+        fixture.Store.SaveCache(account.Id, new() { Matches = [matches[0] with { LevelsRecorded = true }] });
         using var handler = new MatchHandler(matches); using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
         var messages = new List<string>();
         await new LolStatsProvider(fixture.Store, api).RefreshAnalysisAsync(account, Queues.Normal, 20, new InlineProgress(messages.Add), default);

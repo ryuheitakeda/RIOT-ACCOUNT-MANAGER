@@ -104,12 +104,33 @@ public static class Analytics
     // In normal games an unranked opponent is estimated from the ranked opponents with the nearest summoner levels.
     public const int LevelNeighbours = 5;
 
-    public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now)
+    // The matches a forecast is based on: the latest ForecastMatches of the queue in the last 30 days.
+    public static List<MatchRecord> ForecastWindow(AccountCache cache, string puuid, string queue, DateTimeOffset now) =>
+        Recent(cache, puuid, queue, int.MaxValue).Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(ForecastMatches).ToList();
+
+    // (summoner level, rank order) of every opponent with both a current rank observation and a recorded level in any of the caches.
+    // Each player counts once: the Solo/Duo rank (Flex when unranked there) and the level from their most recent stored match.
+    public static List<(int Level, int Order)> LevelCalibration(IEnumerable<AccountCache> caches, DateTimeOffset now)
+    {
+        var all = caches.ToList();
+        var observations = all.SelectMany(c => c.Opponents)
+            .Where(o => Queues.Ranked.Contains(o.QueueType) && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
+            .GroupBy(o => (o.Puuid, o.QueueType)).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
+        var levels = all.SelectMany(c => c.Matches).SelectMany(m => m.Participants.Where(p => p.SummonerLevel > 0).Select(p => (p.Puuid, p.SummonerLevel, m.StartedAt)))
+            .GroupBy(x => x.Puuid).ToDictionary(g => g.Key, g => g.MaxBy(x => x.StartedAt).SummonerLevel);
+        var result = new List<(int Level, int Order)>();
+        foreach (var (puuid, level) in levels)
+            if (Queues.Ranked.Select(q => observations.GetValueOrDefault((puuid, q))).FirstOrDefault(o => o?.Rank is { } rank && rank.QueueType == o.QueueType && rank.Order != null) is { } found)
+                result.Add((level, found.Rank!.Order!.Value));
+        return result;
+    }
+
+    // calibrationSources: the caches whose opponents calibrate the level estimate (all accounts in the app); defaults to this cache.
+    public static Forecast Predict(AccountCache cache, string puuid, string queue, DateTimeOffset now, IEnumerable<AccountCache>? calibrationSources = null)
     {
         var ranked = Queues.IsRanked(queue);
         var reference = ReferenceQueues(queue);
-        var matches = Recent(cache, puuid, queue, int.MaxValue)
-            .Where(m => m.StartedAt >= now.AddDays(-30) && m.StartedAt <= now).Take(ForecastMatches).ToList();
+        var matches = ForecastWindow(cache, puuid, queue, now);
         var observations = cache.Opponents.Where(o => reference.Contains(o.QueueType) && o.ObservedAt <= now && o.ObservedAt >= now - OpponentRankTtl)
             .GroupBy(o => (o.Puuid, o.QueueType)).ToDictionary(g => g.Key, g => g.MaxBy(o => o.ObservedAt)!);
         var known = new List<(int Order, int Level, DateTimeOffset ObservedAt)>();
@@ -132,8 +153,8 @@ public static class Analytics
         }
         var values = known.Select(k => k.Order).ToList();
         var observedAt = known.Select(k => k.ObservedAt).ToList();
-        var calibration = known.Where(k => k.Level > 0).ToList();
         var estimated = 0;
+        var calibration = ranked || unranked.Count == 0 ? [] : LevelCalibration(calibrationSources ?? [cache], now);
         if (calibration.Count >= LevelNeighbours)
             foreach (var (level, at) in unranked)
             {
@@ -149,7 +170,7 @@ public static class Analytics
             { EstimatedPlayers = estimated };
         values.Sort();
         string Quantile(double p) => RankOrder.Label(values[(int)Math.Ceiling(p * values.Count) - 1]);
-        var method = ranked ? "" : $"未ランクの相手は、同じ対象試合に出たランク持ちの相手のうちサモナーレベルが近い{LevelNeighbours}人のランク中央値で推定します。";
+        var method = ranked ? "" : $"未ランクの相手は、全アカウントの保存済み試合に出たランク持ちの相手のうちサモナーレベルが近い{LevelNeighbours}人のランク中央値で推定します。";
         return new(queue, now, matches.Count, values.Count, total, Quantile(.25), Quantile(.5), Quantile(.75),
             $"{basis}の中央50%です。{method}同じ相手も対戦ごとに1件とし、分位点は順位カテゴリのnearest-rank法で計算します。次戦の保証・内部MMRではありません。")
         {
