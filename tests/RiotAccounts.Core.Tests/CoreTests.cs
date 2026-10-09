@@ -189,6 +189,25 @@ public void LevelEstimationNeedsCalibrationAndStaysOffForRanked()
     Equal(40, forecast.KnownPlayers); Equal(0, forecast.EstimatedPlayers); True(!forecast.Explanation.Contains("レベル"));
 }
 [Fact]
+public void LevelCalibrationUsesEveryStoredMatchAndAccount()
+{
+    var cache = NormalSample();
+    // This account alone has fewer than five ranked opponents with levels.
+    var lone = new AccountCache { Matches = cache.Matches.Take(1).ToList() };
+    foreach (var enemy in lone.Matches[0].Participants.Skip(1)) Observe(lone, enemy.Puuid, enemy.SummonerLevel == 250 ? null : 5, null);
+    lone.Matches.AddRange(Enumerable.Range(1, 9).Select(i => NormalMatch(i) with { Participants = [NormalMatch(i).Participants[0]] }));
+    Equal(0, Analytics.Predict(lone, "self", Queues.Normal, Now()).EstimatedPlayers);
+    // Another account's stored matches and observations calibrate it; each player counts once with their latest level.
+    var other = new AccountCache { Matches = [.. cache.Matches.Skip(1), cache.Matches[1] with { Id = "older", StartedAt = Now().AddDays(-5),
+        Participants = cache.Matches[1].Participants.Select(p => p with { SummonerLevel = 1 }).ToList() }], Opponents = cache.Opponents };
+    var calibration = Analytics.LevelCalibration([lone, other], Now());
+    Equal(4 + 9 * 4, calibration.Count); True(calibration.All(c => c.Level >= 100));
+    Equal(1, Analytics.Predict(lone, "self", Queues.Normal, Now(), [lone, other]).EstimatedPlayers);
+    // Observations past the retention period do not calibrate.
+    var expired = new AccountCache { Matches = other.Matches, Opponents = other.Opponents.Select(o => o with { ObservedAt = Now() - Analytics.OpponentRankTtl - TimeSpan.FromMinutes(1) }).ToList() };
+    Equal(0, Analytics.Predict(lone, "self", Queues.Normal, Now(), [lone, expired]).EstimatedPlayers);
+}
+[Fact]
 public void Performance()
 {
     var first = Match(0);
@@ -497,6 +516,37 @@ public async Task NormalRefreshLooksUpOpponentRanks()
     // The Solo refresh meets the same opponents and reuses the normal refresh's lookups.
     await provider.RefreshAnalysisAsync(account, Queues.Solo, 20, new InlineProgress(messages.Add), default);
     Equal(5, lookups); Equal(5, fixture.Store.Cache(account.Id).Forecasts.Single(f => f.QueueType == Queues.Solo).KnownPlayers);
+}
+[Fact]
+public async Task NormalRefreshBackfillsLevelsOnce()
+{
+    using var fixture = new StoreFixture(); var account = Account(); fixture.Store.Save(account);
+    // Saved before levels were recorded: every participant has level 0.
+    var legacy = Match(0) with { QueueId = 400, StartedAt = DateTimeOffset.UtcNow.AddHours(-1) };
+    fixture.Store.SaveCache(account.Id, new() { Matches = [legacy] });
+    var details = 0;
+    using var handler = new Handler((request, _) =>
+    {
+        var path = request.RequestUri!.AbsolutePath; var query = request.RequestUri.Query;
+        if (path.Contains("/by-puuid/enemy")) return Task.FromResult(Response(HttpStatusCode.OK, Array.Empty<RankEntry>()));
+        if (path.EndsWith("/ids")) return Task.FromResult(Response(HttpStatusCode.OK, query.Contains("queue=400") ? new[] { "JP1_0" } : Array.Empty<string>()));
+        if (path.EndsWith("/JP1_0")) { details++; return Task.FromResult(Response(HttpStatusCode.OK, new
+        {
+            metadata = new { matchId = "JP1_0" },
+            info = new { queueId = 400, gameStartTimestamp = legacy.StartedAt.ToUnixTimeMilliseconds(), gameDuration = 1800,
+                participants = legacy.Participants.Select((p, i) => new { puuid = p.Puuid, teamId = p.TeamId, championName = p.Champion, teamPosition = p.Role,
+                    kills = p.Kills, deaths = p.Deaths, assists = p.Assists, totalMinionsKilled = 180, neutralMinionsKilled = 20, visionScore = p.VisionScore, win = p.Win, summonerLevel = 100 + i }) }
+        })); }
+        return Task.FromResult(Response(HttpStatusCode.NotFound));
+    });
+    using var client = new HttpClient(handler); using var api = new RiotApi(client, () => "test");
+    var provider = new LolStatsProvider(fixture.Store, api); var messages = new List<string>();
+    await provider.RefreshAnalysisAsync(account, Queues.Normal, 20, new InlineProgress(messages.Add), default);
+    Equal(1, details); True(messages.Any(m => m.Contains("レベルを補完中 1/1")));
+    var match = fixture.Store.Cache(account.Id).Matches.Single();
+    True(match.LevelsRecorded); True(new[] { 100, 101, 102, 103, 104, 105 }.SequenceEqual(match.Participants.Select(p => p.SummonerLevel)));
+    await provider.RefreshAnalysisAsync(account, Queues.Normal, 20, new InlineProgress(_ => { }), default);
+    Equal(1, details);
 }
 [Fact]
 public async Task PartialCancellation()

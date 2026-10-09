@@ -24,7 +24,7 @@ public sealed class OpggTests
         {
             new { champion_id = 103, team_key = "BLUE", position = "MID", summoner = new { puuid = "opgg-self" },
                 stats = new { kill = game.Kills, death = 2, assist = 7, minion_kill = 180, neutral_minion_kill = 12, vision_score = 20, result = "WIN" } },
-            new { champion_id = 64, team_key = "RED", position = "JUNGLE", summoner = new { puuid = "opgg-enemy" },
+            new { champion_id = 64, team_key = "RED", position = "JUNGLE", summoner = new { puuid = "opgg-enemy", level = 321 },
                 stats = new { kill = 3, death = 5, assist = 4, minion_kill = 30, neutral_minion_kill = 150, vision_score = 30, result = "LOSE" } }
         }
     };
@@ -99,6 +99,7 @@ public sealed class OpggTests
         var self = match.Participants.Single(p => p.Puuid == "riot-self");
         Assert.Equal(("Ahri", "MIDDLE", 100, 192, true), (self.Champion, self.Role, self.TeamId, self.Cs, self.Win));
         var enemy = match.Participants.Single(p => p.Puuid == "opgg-enemy");
+        Assert.Equal(321, enemy.SummonerLevel); Assert.Equal(0, self.SummonerLevel); Assert.False(match.LevelsRecorded);
         Assert.Equal(("LeeSin", "JUNGLE", 200, false), (enemy.Champion, enemy.Role, enemy.TeamId, enemy.Win));
     }
 

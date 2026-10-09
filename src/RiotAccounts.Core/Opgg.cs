@@ -229,11 +229,13 @@ public sealed class OpggStatsProvider(Store store, OpggApi api) : IGameStatsProv
         var participants = game.GetProperty("participants").EnumerateArray().Select(p =>
         {
             var stats = p.GetProperty("stats");
-            var puuid = p.TryGetProperty("summoner", out var summoner) ? Str(summoner, "puuid") : "";
+            var hasSummoner = p.TryGetProperty("summoner", out var summoner);
+            var puuid = hasSummoner ? Str(summoner, "puuid") : "";
             var champion = champions.TryGetValue(Num(p, "champion_id"), out var name) ? name : $"#{Num(p, "champion_id")}";
             return new Participant(puuid == opggPuuid ? selfPuuid : puuid, Str(p, "team_key") == "RED" ? 200 : 100, champion,
                 Role(Str(p, "position")), Num(stats, "kill"), Num(stats, "death"), Num(stats, "assist"),
-                Num(stats, "minion_kill") + Num(stats, "neutral_minion_kill"), Num(stats, "vision_score"), Str(stats, "result") == "WIN");
+                Num(stats, "minion_kill") + Num(stats, "neutral_minion_kill"), Num(stats, "vision_score"), Str(stats, "result") == "WIN",
+                hasSummoner ? Num(summoner, "level") : 0);
         }).ToList();
         var id = Str(game, "id");
         if (id.Length == 0) throw new FormatException("OP.GG game id is missing.");
