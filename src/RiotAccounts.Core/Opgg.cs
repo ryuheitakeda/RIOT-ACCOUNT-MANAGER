@@ -177,6 +177,9 @@ public sealed class OpggStatsProvider(Store store, OpggApi api) : IGameStatsProv
                 if (match.Participants.Count(p => p.Puuid == self) != 1)
                     throw new RiotApiException("OP.GGの試合にアカウントが含まれていません。保存済みデータを表示しています。");
                 if (known.Add(match.Id)) cache.Matches.Add(match);
+                // Matches saved before the average tier was read get it once; a recorded value is never rewritten.
+                else if (match.AverageTier != null && cache.Matches.FindIndex(m => m.Id == match.Id && m.AverageTier == null) is var index and >= 0)
+                    cache.Matches[index] = cache.Matches[index] with { AverageTier = match.AverageTier };
                 if (!match.Remake && match.DurationSeconds > 0) found++;
                 if (found >= count) break;
             }
@@ -239,9 +242,18 @@ public sealed class OpggStatsProvider(Store store, OpggApi api) : IGameStatsProv
         }).ToList();
         var id = Str(game, "id");
         if (id.Length == 0) throw new FormatException("OP.GG game id is missing.");
-        return new(MatchIdPrefix + id, Num(game, "queue_id"),
-            DateTimeOffset.Parse(Str(game, "created_at"), CultureInfo.InvariantCulture), Num(game, "game_length_second"),
-            game.TryGetProperty("is_remake", out var remake) && remake.ValueKind == JsonValueKind.True, participants);
+        var startedAt = DateTimeOffset.Parse(Str(game, "created_at"), CultureInfo.InvariantCulture);
+        return new(MatchIdPrefix + id, Num(game, "queue_id"), startedAt, Num(game, "game_length_second"),
+            game.TryGetProperty("is_remake", out var remake) && remake.ValueKind == JsonValueKind.True, participants)
+        { AverageTier = ParseAverageTier(game, startedAt) };
+    }
+
+    // OP.GG's lobby average, e.g. {"tier":"SILVER","division":3}; null when missing or unknown.
+    private static MatchAverageTier? ParseAverageTier(JsonElement game, DateTimeOffset startedAt)
+    {
+        if (!game.TryGetProperty("average_tier_info", out var info) || info.ValueKind != JsonValueKind.Object) return null;
+        var division = Num(info, "division") switch { 1 => "I", 2 => "II", 3 => "III", 4 => "IV", _ => "" };
+        return RankOrder.Parse(Str(info, "tier").ToUpperInvariant(), division) is { } order ? new(order, MatchAverageTier.Opgg, startedAt) : null;
     }
 
     // Riot's teamPosition names, so role stats merge across sources.

@@ -253,7 +253,9 @@ internal static class SmokeTests
             Require(!normal.IsRanked && normal.QueueIds.Count() == 4);
             var normalMatches = normal.QueueIds.Select((queueId, index) => new MatchRecord(
                 "dummy-normal-" + queueId, queueId, now.AddMinutes(-index * 40), 1800, false,
-                [new(puuid, 100, index % 2 == 0 ? "Ahri" : "Lux", index % 2 == 0 ? "MIDDLE" : "SUPPORT", 5, 2, 8, 180, 20, index % 2 == 0)])).ToList();
+                [new(puuid, 100, index % 2 == 0 ? "Ahri" : "Lux", index % 2 == 0 ? "MIDDLE" : "SUPPORT", 5, 2, 8, 180, 20, index % 2 == 0)])
+                // Two matches carry an average tier (one per source); the others have none and stay off the history.
+                { AverageTier = index switch { 0 => new(9, MatchAverageTier.Opgg, now), 1 => new(12.4, MatchAverageTier.Riot, now, 9, 2), _ => null } }).ToList();
             store.Write("cache", account.Id.ToString(), new AccountCache
             {
                 Ranks = [new(now, [new(Queues.Solo, "GOLD", "IV", 25, 3, 2), new(Queues.Flex, "SILVER", "II", 60, 2, 4)])],
@@ -278,7 +280,7 @@ internal static class SmokeTests
             tabs.SelectedItem = history;
             queuePicker.SelectedItem = normal;
             VerifyNormal();
-            Require(tabs.SelectedItem == overview);
+            Require(tabs.SelectedItem == history);
 
             queuePicker.SelectedItem = Queues.Definitions.Single(queue => queue.Key == Queues.Solo);
             Require(Control<FrameworkElement>("RankedSummaryPanel").Visibility == Visibility.Visible);
@@ -297,13 +299,17 @@ internal static class SmokeTests
             tabs.SelectedItem = history;
             queuePicker.SelectedItem = normal;
             VerifyNormal();
-            Require(tabs.SelectedItem == overview);
+            Require(tabs.SelectedItem == history);
             if (artifactDirectory != null)
             {
                 Directory.CreateDirectory(artifactDirectory);
                 Render(window, Path.Combine(artifactDirectory, "self-test-normal.png"));
                 tabs.SelectedItem = Control<TabItem>("MatchesTab");
                 Render(window, Path.Combine(artifactDirectory, "self-test-normal-matches.png"));
+                tabs.SelectedItem = history;
+                Render(window, Path.Combine(artifactDirectory, "self-test-normal-history.png"));
+                // The isolated render does not draw the ScottPlot surface, so the chart itself is saved directly.
+                Control<ScottPlot.WPF.WpfPlot>("HistoryPlot").Plot.SavePng(Path.Combine(artifactDirectory, "self-test-normal-history-plot.png"), 860, 320);
             }
 
             T Control<T>(string name) where T : FrameworkElement => window.FindName(name) as T
@@ -317,11 +323,15 @@ internal static class SmokeTests
                 var range = Control<TextBlock>("ForecastRange").Text;
                 Require(range.Contains("SILVER I", StringComparison.Ordinal) && !range.Contains("PLATINUM IV", StringComparison.Ordinal));
                 Require(Control<TextBlock>("ForecastDetails").Text.Contains("レベル推定 7件", StringComparison.Ordinal));
-                Require(history.Visibility == Visibility.Collapsed);
+                Require(history.Visibility == Visibility.Visible);
                 Require(Control<TextBlock>("NormalModeText").Visibility == Visibility.Visible);
                 foreach (var name in new[] { "RankTitle", "RankRecord", "RankTime" })
                     Require(string.IsNullOrEmpty(Control<TextBlock>(name).Text));
-                Require(Control<ListBox>("HistoryList").Items.Count == 0);
+                Require(Control<TextBlock>("HistoryNote").Text.Contains("平均ティア", StringComparison.Ordinal));
+                Require(Control<ScottPlot.WPF.WpfPlot>("HistoryPlot").Plot.GetPlottables().Count() == 1);
+                var averages = Control<ListBox>("HistoryList").Items.Cast<string>().ToList();
+                Require(averages.Count == 2 && averages[0].Contains("SILVER III", StringComparison.Ordinal) && averages[0].Contains("OP.GG", StringComparison.Ordinal)
+                    && averages[1].Contains("GOLD IV", StringComparison.Ordinal) && averages[1].Contains("レベル推定2人", StringComparison.Ordinal));
                 Require(matches.Items.Count == 4);
                 var expectedModes = normalMatches.Select(match => Queues.MatchName(match.QueueId)).ToHashSet(StringComparer.Ordinal);
                 Require(matches.Items.Cast<object>().Select(row => Cell(row, "Mode")).ToHashSet(StringComparer.Ordinal).SetEquals(expectedModes));
