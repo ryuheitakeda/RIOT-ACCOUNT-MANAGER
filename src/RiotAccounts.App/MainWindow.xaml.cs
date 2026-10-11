@@ -26,8 +26,14 @@ public partial class MainWindow:Window
     private readonly StatsDiagnostics diagnostics;
     private readonly IGameStatsProvider riotLogged;
     private readonly IGameStatsProvider opggLogged;
-    private bool UsingOpgg=>store.Read<string>("setting","statsSource")=="opgg";
-    private IGameStatsProvider Provider=>UsingOpgg?opggLogged:riotLogged;
+    private readonly WebStatsClient webClient;
+    private readonly WebStatsProvider webProvider;
+    private readonly IGameStatsProvider webLogged;
+    // "web" reads what the self-hosted web version fetched (docs/web-server.md); this PC then never calls the Riot API itself.
+    private string Source=>store.Read<string>("setting","statsSource") switch{"opgg"=>"opgg","web"=>"web",_=>"riot"};
+    private bool UsingOpgg=>Source=="opgg";
+    private string SourceName=>Source switch{"opgg"=>"OP.GG（非公式）","web"=>"Web版",_=>"Riot API"};
+    private IGameStatsProvider Provider=>Source switch{"opgg"=>opggLogged,"web"=>webLogged,_=>riotLogged};
     private readonly NativeLogin login;
     private CancellationTokenSource? operation;
     private bool initialized;
@@ -41,6 +47,9 @@ public partial class MainWindow:Window
         api=new(http,()=>store.GetSecret("riot-api-key"),log);riotProvider=new(store,api);opggApi=new(http,null,log);opggProvider=new(store,opggApi);login=new(store,log);
         riotLogged=new LoggedStatsProvider(riotProvider,"Riot API",log);opggLogged=new LoggedStatsProvider(opggProvider,"OP.GG",log);
         diagnostics=new(api,opggApi,()=>store.GetSecret("riot-api-key"),log);
+        webClient=new(http,()=>store.Read<string>("setting","webServerUrl"));webProvider=new(store,webClient);webLogged=new LoggedStatsProvider(webProvider,"Web版",log);
+        // Copying the web version's saved data calls no Riot API, so it runs at every start instead of waiting for a manual refresh.
+        Loaded+=async(_,_)=>{if(Source=="web")await Run(SyncFromWeb);};
         InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
         Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
         Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
@@ -58,7 +67,7 @@ public partial class MainWindow:Window
         if(!initialized)return;
         var a=Selected;EmptyPanel.Visibility=a==null?Visibility.Visible:Visibility.Collapsed;DetailPanel.Visibility=a==null?Visibility.Collapsed:Visibility.Visible;if(a==null)return;
         AccountTitle.Text=a.Label;AccountNote.Text=a.Note??"";AccountNote.Visibility=a.Note==null?Visibility.Collapsed:Visibility.Visible;var seen=store.Cache(a.Id);var last=new[]{seen.Ranks.LastOrDefault()?.ObservedAt,seen.MatchesUpdatedAt}.Max();
-        AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {(UsingOpgg?"OP.GG（非公式）":"Riot API")}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
+        AccountIdentity.Text=$"{a.RiotId}  /  {a.Lol.Platform}  /  取得元 {SourceName}  /  最終取得 {(last is{} t?t.LocalDateTime.ToString("MM/dd HH:mm"):"未取得")}";
         var ranked=Queues.Get(Queue).IsRanked;
         RankedSummaryPanel.Visibility=ranked?Visibility.Visible:Visibility.Collapsed;
         NormalModeText.Visibility=ranked?Visibility.Collapsed:Visibility.Visible;
@@ -157,10 +166,10 @@ public partial class MainWindow:Window
     private async void Diagnose_Click(object sender,RoutedEventArgs e)
     {
         if(Selected is not{} a){StatusText.Text="診断するアカウントを選んでください。";return;}
-        var source=UsingOpgg?"opgg":"riot";
+        var source=Source;
         await Run(async(progress,ct)=>
         {
-            var report=await diagnostics.RunAsync(a,source,progress,ct);
+            var report=source=="web"?await webProvider.DiagnoseAsync(a,ct):await diagnostics.RunAsync(a,source,progress,ct);
             progress.Report(report.Ok?"接続を診断しました。すべての段階に成功しました。":$"接続を診断しました。「{report.Failed!.Name}」で失敗しました。");
             new DiagnosticsDialog(report,log.FilePath){Owner=this}.ShowDialog();
         });
@@ -202,11 +211,19 @@ public partial class MainWindow:Window
         try
         {
             var dialog=new AccountDialog(store,account){Owner=this};
-            if(dialog.ShowDialog()==true)Reload(dialog.SavedId);
+            if(dialog.ShowDialog()==true){Reload(dialog.SavedId);PushToWeb(dialog.SavedId);}
         }
         catch(Exception ex) when(ex is CryptographicException or Microsoft.Data.Sqlite.SqliteException or InvalidOperationException)
         {StatusText.Text="登録情報を開けません。保存先と、登録したWindowsユーザーを確認してください。";}
     }
+    // Registers an added or edited account with the web version so its scheduled refresh covers it. Credentials are never sent.
+    private async void PushToWeb(Guid id)
+    {
+        if(Source!="web"||store.Accounts().SingleOrDefault(a=>a.Id==id) is not{} account)return;
+        try{await webClient.SaveAccountAsync(account,CancellationToken.None);StatusText.Text=$"「{account.Label}」をWeb版にも登録しました。";}
+        catch(Exception ex) when(ex is InvalidOperationException or OperationCanceledException){StatusText.Text=$"Web版への登録に失敗しました（{ex.Message}）。更新時にもう一度登録します。";}
+    }
+    private async Task SyncFromWeb(IProgress<string> progress,CancellationToken ct)=>progress.Report((await webProvider.SyncAllAsync(progress,ct)).Message);
     private void Delete_Click(object sender,RoutedEventArgs e)
     {
         if(operation!=null||Selected is not{} a)return;
@@ -258,9 +275,10 @@ public partial class MainWindow:Window
         if(Selected is{} a&&MatchesGrid.SelectedItem is MatchRow row)new ScoreboardDialog(row.Match,a.Lol.Puuid??""){Owner=this}.ShowDialog();
     }
     private void Cancel_Click(object sender,RoutedEventArgs e)=>operation?.Cancel();
-    private void Settings_Click(object sender,RoutedEventArgs e)
+    private async void Settings_Click(object sender,RoutedEventArgs e)
     {
         if(operation!=null)return;
+        var before=(Source,store.Read<string>("setting","webServerUrl"));
         try
         {
             string? clientPath;
@@ -275,6 +293,7 @@ public partial class MainWindow:Window
             }
         }
         catch(Exception ex) when(ex is CryptographicException or Microsoft.Data.Sqlite.SqliteException)
-        {StatusText.Text="設定を開けません。保存先と、登録したWindowsユーザーを確認してください。";}
+        {StatusText.Text="設定を開けません。保存先と、登録したWindowsユーザーを確認してください。";return;}
+        if(Source=="web"&&before!=(Source,store.Read<string>("setting","webServerUrl")))await Run(SyncFromWeb);
     }
 }

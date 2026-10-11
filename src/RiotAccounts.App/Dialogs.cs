@@ -143,10 +143,17 @@ public sealed class SettingsDialog : Window
         var clearKey = new CheckBox { Content = "保存済みのAPIキーを削除する", Margin = new Thickness(0, 0, 0, 20) };
         form.Children.Add(clearKey);
         var source = new ComboBox { DisplayMemberPath = "Value", SelectedValuePath = "Key" };
-        source.ItemsSource = new Dictionary<string, string> { ["riot"] = "Riot API（公式・APIキーが必要）", ["opgg"] = "OP.GG（非公式・APIキー不要）" };
-        source.SelectedValue = store.Read<string>("setting", "statsSource") == "opgg" ? "opgg" : "riot";
+        source.ItemsSource = new Dictionary<string, string>
+        {
+            ["riot"] = "Riot API（公式・APIキーが必要）", ["opgg"] = "OP.GG（非公式・APIキー不要）", ["web"] = "Web版（自宅サーバー・このPCのAPIキー不要）"
+        };
+        string SavedSource() => store.Read<string>("setting", "statsSource") switch { "opgg" => "opgg", "web" => "web", _ => "riot" };
+        source.SelectedValue = SavedSource();
         DialogLayout.Field(form, "ランク・戦績の取得元", source);
         form.Children.Add(DialogLayout.Hint("OP.GGは非公式の取得方法です。仕様変更で突然使えなくなることがあり、OP.GG側の更新が遅れると最新の試合が含まれません。参考ランク帯はRiot API利用時のみ算出します。"));
+        var webUrl = new TextBox { Text = store.Read<string>("setting", "webServerUrl") ?? "" };
+        DialogLayout.Field(form, "Web版のURL（取得元がWeb版のとき）", webUrl);
+        form.Children.Add(DialogLayout.Hint("例：https://<Macの名前>.<tailnet名>.ts.net:8446 。Web版が6時間ごとに取得したデータを起動時に同期し、更新ボタンはWeb版に依頼します。このPCからはRiot APIを呼びません。ログイン情報はWeb版に送りません。"));
         form.Children.Add(DialogLayout.Hint($"保存先：{folder}\n暗号化データは別のWindowsユーザーでは復号できません。"));
         var error = DialogLayout.Hint(""); error.Foreground = System.Windows.Media.Brushes.Firebrick; form.Children.Add(error);
         var warned = false;
@@ -168,7 +175,12 @@ public sealed class SettingsDialog : Window
                     }
                     store.SetSecret("riot-api-key", key.Password.Trim());
                 }
-                store.Write("setting", "statsSource", source.SelectedValue as string == "opgg" ? "opgg" : "riot");
+                var selected = source.SelectedValue as string is "opgg" or "web" ? (string)source.SelectedValue : "riot";
+                var url = webUrl.Text.Trim().TrimEnd('/');
+                if ((url.Length > 0 && WebStatsClient.BaseUri(url) == null) || (selected == "web" && url.Length == 0))
+                { error.Text = "Web版のURLを「https://」から始まる形で入力してください。"; return false; }
+                store.Write("setting", "webServerUrl", url);
+                store.Write("setting", "statsSource", selected);
                 key.Clear(); return true;
             }
             catch (Exception ex) when (ex is CryptographicException or SqliteException)
@@ -176,8 +188,8 @@ public sealed class SettingsDialog : Window
         }
         setup.Click += (_, _) =>
         {
-            var savedSource = store.Read<string>("setting", "statsSource") == "opgg" ? "opgg" : "riot";
-            if (!string.IsNullOrEmpty(key.Password) || clearKey.IsChecked == true || source.SelectedValue as string != savedSource)
+            if (!string.IsNullOrEmpty(key.Password) || clearKey.IsChecked == true || source.SelectedValue as string != SavedSource()
+                || webUrl.Text.Trim().TrimEnd('/') != (store.Read<string>("setting", "webServerUrl") ?? ""))
             { error.Text = "APIキー・取得元の変更を先に「保存」してから、自動入力の設定を開いてください。"; return; }
             SetupRequested = true; DialogResult = true;
         };
