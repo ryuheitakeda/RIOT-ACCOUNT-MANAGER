@@ -18,3 +18,6 @@ TestResults/
 # Private local planning and handoff notes
 /PLAN.md
 /STATUS.md
+
+# Web server deployed on this machine (binaries, data, deploy.env)
+/server/

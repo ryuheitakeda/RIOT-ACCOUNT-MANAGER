@@ -1,0 +1,80 @@
+@page
+@model SettingsModel
+@{
+    ViewData["Title"] = "設定";
+}
+<div class="page-head">
+    <h1>設定</h1>
+</div>
+
+<div class="grid two">
+    <section class="panel">
+        <h2>Riot APIキー</h2>
+        <p>状態: <strong>@(Model.Registered ? "登録済み" : "未登録")</strong>（値は表示しません）</p>
+        <form method="post" asp-page-handler="Key" class="form" autocomplete="off">
+            <label>新しいキー<input type="password" name="apiKey" autocomplete="off" spellcheck="false" placeholder="RGAPI-..." /></label>
+            <button type="submit">保存</button>
+        </form>
+        <p class="sub">キーはこのサーバーのデータフォルダに暗号化して保存します。Riot APIを呼ぶのはWeb版だけです。</p>
+    </section>
+
+    <section class="panel">
+        <h2>接続を診断</h2>
+        @if (Model.Accounts.Count == 0)
+        {
+            <p class="empty">アカウントを追加すると診断できます。</p>
+        }
+        else
+        {
+            <form method="post" asp-page-handler="Diagnose" class="form">
+                <label>アカウント
+                    <select name="accountId">
+                        @foreach (var account in Model.Accounts)
+                        {
+                            <option value="@account.Id">@account.Label（@account.RiotId）</option>
+                        }
+                    </select>
+                </label>
+                <button type="submit" class="secondary">診断する（Riot APIを4回呼びます）</button>
+            </form>
+        }
+        @if (Model.Report != null) { <pre class="report">@Model.Report</pre> }
+    </section>
+</div>
+
+<section class="panel">
+    <h2>Riot APIのレート制限（実測）</h2>
+    <p class="sub">Riotが応答ヘッダーで返した値です。「20:1,100:120」は「1秒に20回・120秒に100回まで」、括弧内はその時点の使用数。個人キーの公開上限は1秒20回・2分100回（リージョンごと）で、エンドポイント別の上限は公開されていないため、ここで確認します。</p>
+    @if (Model.RateLimits.Count == 0)
+    {
+        <p class="empty">まだ記録がありません。最初の更新後に表示されます。</p>
+    }
+    else
+    {
+        <table class="list compact cards">
+            <thead><tr><th>接続先</th><th>エンドポイント</th><th>アプリ上限（使用）</th><th>メソッド上限（使用）</th><th>最終応答</th></tr></thead>
+            <tbody>
+                @foreach (var limit in Model.RateLimits)
+                {
+                    <tr>
+                        <td class="title">@limit.Host</td>
+                        <td data-label="エンドポイント"><code>@limit.Route</code></td>
+                        <td data-label="アプリ上限">@(limit.AppLimit ?? "—") <span class="sub">(@(limit.AppCount ?? "—"))</span></td>
+                        <td data-label="メソッド上限">@(limit.MethodLimit ?? "—") <span class="sub">(@(limit.MethodCount ?? "—"))</span></td>
+                        <td data-label="最終応答">@Format.Time(limit.ObservedAt) HTTP @limit.Status@(limit.LimitType is { } type ? $"（{type}）" : "")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+<section class="panel">
+    <h2>動作</h2>
+    <dl class="facts">
+        <dt>自動更新</dt><dd>@Model.Settings.RefreshIntervalHours 時間ごとに全アカウントの Solo/Duo・Flex・ノーマルを取得（中断時は30分後に再試行）</dd>
+        <dt>取得件数</dt><dd>各キュー直近 @Model.Settings.MatchCount 戦（保存済みの試合は再取得しません）</dd>
+        <dt>データフォルダ</dt><dd><code>@Model.Settings.DataDir</code></dd>
+        <dt>バージョン</dt><dd><code>@RefreshWorker.Version</code></dd>
+    </dl>
+</section>

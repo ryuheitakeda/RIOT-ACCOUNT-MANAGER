@@ -1,0 +1,171 @@
+@page "/Account/{id:guid}"
+@model AccountModel
+@{
+    ViewData["Title"] = Model.Account.Label;
+    ViewData["AutoReload"] = true;
+    var updated = Model.Cache.QueueUpdatedAt.TryGetValue(Model.Queue, out var at) ? at : (DateTimeOffset?)null;
+}
+<div class="page-head">
+    <div>
+        <h1>@Model.Account.Label</h1>
+        <p class="sub">@Model.Account.RiotId ／ @Model.Account.Lol.Platform ／ 最終取得 @Format.Time(Format.LastFetched(Model.Cache))</p>
+        @if (Model.Account.Note != null) { <p class="note">@Model.Account.Note</p> }
+    </div>
+    <form method="post" asp-page-handler="Refresh" asp-route-id="@Model.Account.Id" asp-route-queue="@Model.Queue" asp-route-count="@Model.Count">
+        <button type="submit">このアカウントを今すぐ更新</button>
+    </form>
+</div>
+
+<nav class="tabs" aria-label="キュー">
+    @foreach (var queue in Queues.Definitions)
+    {
+        <a class="@(queue.Key == Model.Queue ? "active" : "")" href="/Account/@Model.Account.Id?queue=@queue.Key&count=@Model.Count">@queue.Name</a>
+    }
+    <span class="spacer"></span>
+    @foreach (var count in new[] { 20, 50 })
+    {
+        <a class="@(count == Model.Count ? "active" : "")" href="/Account/@Model.Account.Id?queue=@Model.Queue&count=@count">直近@(count)戦</a>
+    }
+</nav>
+
+<div class="grid">
+    @if (Model.Ranked)
+    {
+        <section class="card">
+            <h2>ランク</h2>
+            <p class="big">@(Model.Latest == null ? "未取得" : Model.Rank?.Display ?? "UNRANKED")</p>
+            <p>@(Model.Rank?.Record ?? (Model.Latest == null ? "自動更新で取得します。" : "このキューのランク情報はありません。"))</p>
+            <p class="sub">@(Model.Latest == null ? "" : $"観測日時 {Format.Time(Model.Latest.ObservedAt)}")</p>
+        </section>
+    }
+    <section class="card">
+        <h2>@(Model.Ranked ? "次戦の参考ランク帯" : "次戦の参考ランク帯（相手のSolo/Duoランク基準）")</h2>
+        <p class="big">@(Model.Forecast?.Lower == null ? "データ不足" : $"{Model.Forecast.Lower} 〜 {Model.Forecast.Upper}")</p>
+        <p class="pre sub">@Model.ForecastDetails()</p>
+    </section>
+    <section class="card">
+        <h2>成績（直近@(Model.Count)戦）</h2>
+        @if (Model.Summary is { } s)
+        {
+            <p class="big">@s.Games 戦 @s.Wins 勝 @(s.Games - s.Wins) 敗 <span class="sub">勝率 @s.WinRate.ToString("F1")%</span></p>
+            <p>KDA @s.Kda.ToString("F2") ／ CS/分 @s.CsPerMinute.ToString("F1") ／ 平均視界スコア @s.VisionPerGame.ToString("F1")</p>
+        }
+        else
+        {
+            <p>まだ戦績がありません。</p>
+        }
+        <p class="sub">@(updated is { } u ? $"戦績取得 {Format.Time(u)} ／ リメイクは集計対象外" : "このキューの戦績は未取得です。")</p>
+    </section>
+</div>
+
+<section class="panel">
+    <h2>推移</h2>
+    <p class="sub">
+        @if (Model.Ranked)
+        {
+            @:更新した時点のLPを記録します（試合ごとのLP変動ではありません）。ランク変更をまたぐ線は接続しません。
+        }
+        else
+        {
+            @:ノーマル戦の試合ごとの平均ティア（参加者10人のランクの平均）です。OP.GGの値はOP.GGの算出値、Riot APIの値は取得時点のSolo/Duo（なければFlex）ランクの平均で、未ランクの参加者はサモナーレベルから推定します。一度記録した値は更新しません。
+        }
+    </p>
+    @if (Model.HasChart)
+    {
+        <div class="chart"><canvas id="history-chart" role="img" aria-label="@(Model.Ranked ? "LPの推移" : "試合ごとの平均ティアの推移")"></canvas></div>
+        <script type="application/json" id="chart-data">@Html.Raw(Model.ChartJson)</script>
+    }
+    else
+    {
+        <p class="empty">まだ表示できるデータがありません。</p>
+    }
+    @if (Model.Ranked && Model.RankRows.Count > 0)
+    {
+        <details class="history">
+            <summary>観測の一覧（@Model.RankRows.Count 件）</summary>
+            <table class="list compact">
+                <thead><tr><th>観測日時</th><th>ランク</th><th>変化</th><th>回数</th></tr></thead>
+                <tbody>
+                    @foreach (var row in Model.RankRows)
+                    {
+                        <tr><td>@row.Period</td><td>@row.Rank</td><td>@row.Change</td><td>@row.Observations</td></tr>
+                    }
+                </tbody>
+            </table>
+        </details>
+    }
+    @if (!Model.Ranked && Model.TierRows.Count > 0)
+    {
+        <details class="history">
+            <summary>試合ごとの平均ティア（@Model.TierRows.Count 件）</summary>
+            <table class="list compact">
+                <thead><tr><th>日時</th><th>平均ティア</th><th>結果</th><th>チャンピオン</th><th>算出元</th></tr></thead>
+                <tbody>
+                    @foreach (var row in Model.TierRows)
+                    {
+                        <tr><td>@row.When</td><td>@row.Tier</td><td><span class="result @(row.Win ? "win" : "loss")">@(row.Win ? "勝利" : "敗北")</span></td><td>@row.Champion</td><td class="sub">@row.Source</td></tr>
+                    }
+                </tbody>
+            </table>
+        </details>
+    }
+</section>
+
+<section class="panel">
+    <h2>試合（直近@(Model.Count)戦）</h2>
+    @if (Model.Recent.Count == 0)
+    {
+        <p class="empty">まだ試合がありません。</p>
+    }
+    <div class="matches">
+        @foreach (var match in Model.Recent)
+        {
+            var self = Model.Self(match);
+            <details class="match @(self.Win ? "win" : "loss")">
+                <summary>
+                    <span class="when">@Format.Short(match.StartedAt)</span>
+                    <span class="mode">@Queues.MatchName(match.QueueId)</span>
+                    <span class="result @(self.Win ? "win" : "loss")">@(self.Win ? "勝利" : "敗北")</span>
+                    <span class="champion">@self.Champion</span>
+                    <span class="kda">@self.Kills / @self.Deaths / @self.Assists</span>
+                    <span class="cs">CS/分 @((self.Cs / (match.DurationSeconds / 60.0)).ToString("F1"))</span>
+                    <span class="duration">@Format.Duration(match.DurationSeconds)</span>
+                    @if (match.AverageTier is { } tier) { <span class="tier">平均 @tier.Label</span> }
+                </summary>
+                <div class="scoreboard">
+                    @foreach (var team in Analytics.Scoreboard(match, Model.Puuid))
+                    {
+                        <table class="list compact">
+                            <caption>@team.Title</caption>
+                            <thead><tr><th>チャンピオン</th><th>ロール</th><th>K / D / A</th><th>CS/分</th><th>視界</th></tr></thead>
+                            <tbody>
+                                @foreach (var player in team.Players)
+                                {
+                                    <tr class="@(player.IsSelf ? "self" : "")"><td>@player.Champion</td><td>@player.Role</td><td>@player.Kda</td><td>@player.CsPerMinute</td><td>@player.VisionScore</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            </details>
+        }
+    </div>
+</section>
+
+<div class="grid two">
+    <section class="panel">
+        <h2>チャンピオン別</h2>
+        <partial name="_Performance" model="Model.Champions" />
+    </section>
+    <section class="panel">
+        <h2>ロール別</h2>
+        <partial name="_Performance" model="Model.Roles" />
+    </section>
+</div>
+
+@section Scripts {
+    @if (Model.HasChart)
+    {
+        <script src="~/lib/chart.js/chart.umd.min.js"></script>
+    }
+}
