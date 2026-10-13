@@ -152,8 +152,8 @@ public sealed class SettingsDialog : Window
         DialogLayout.Field(form, "ランク・戦績の取得元", source);
         form.Children.Add(DialogLayout.Hint("OP.GGは非公式の取得方法です。仕様変更で突然使えなくなることがあり、OP.GG側の更新が遅れると最新の試合が含まれません。参考ランク帯はRiot API利用時のみ算出します。"));
         var webUrl = new TextBox { Text = store.Read<string>("setting", "webServerUrl") ?? "" };
-        DialogLayout.Field(form, "Web版のURL（取得元がWeb版のとき）", webUrl);
-        form.Children.Add(DialogLayout.Hint("例：https://<Macの名前>.<tailnet名>.ts.net:8446 。Web版が6時間ごとに取得したデータを起動時に同期し、更新ボタンはWeb版に依頼します。このPCからはRiot APIを呼びません。ログイン情報はWeb版に送りません。"));
+        DialogLayout.Field(form, "Web版のURL（任意）", webUrl);
+        form.Children.Add(DialogLayout.Hint("例：https://<Macの名前>.<tailnet名>.ts.net:8446 。URLを設定すると、取得元に関係なく起動時・スリープ復帰時・5分ごと（Web版側に新しい取得結果があるときだけ）にWeb版の取得結果を取り込み、保存済みデータに統合します。取り込みではこのPCからRiot APIを呼びません。取得元をWeb版にすると更新ボタンもWeb版に依頼します。アカウントの表示名・Riot ID・サーバー・メモはWeb版に登録します（ログイン情報は送りません）。"));
         form.Children.Add(DialogLayout.Hint($"保存先：{folder}\n暗号化データは別のWindowsユーザーでは復号できません。"));
         var error = DialogLayout.Hint(""); error.Foreground = System.Windows.Media.Brushes.Firebrick; form.Children.Add(error);
         var warned = false;

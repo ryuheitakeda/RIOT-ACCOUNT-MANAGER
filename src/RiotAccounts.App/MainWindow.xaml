@@ -3,7 +3,7 @@
  <Grid Margin="26">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <DockPanel Margin="0,0,0,22">
-   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"><Button Content="全ランク更新" Click="RefreshAll_Click"/><Button Content="接続を診断" Click="Diagnose_Click"/><Button Content="設定" Click="Settings_Click"/></StackPanel>
+   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"><Button x:Name="ImportFromWebButton" Content="Web版から取り込み" Click="ImportFromWeb_Click" Visibility="Collapsed" ToolTip="Web版が取得した結果を取り込んで保存済みデータに統合します（Riot APIは呼びません）"/><Button Content="全ランク更新" Click="RefreshAll_Click"/><Button Content="接続を診断" Click="Diagnose_Click"/><Button Content="設定" Click="Settings_Click"/></StackPanel>
    <StackPanel><TextBlock Text="Riot Accounts" FontSize="29" FontWeight="SemiBold"/><TextBlock Text="アカウントを選んで、次の一戦へ。" Foreground="#597183" Margin="0,4,0,0"/></StackPanel>
   </DockPanel>
   <Grid Grid.Row="1">
@@ -56,6 +56,6 @@
     </Grid>
    </Grid>
   </Grid>
-  <DockPanel Grid.Row="2" Margin="0,18,0,0"><Button DockPanel.Dock="Right" x:Name="CancelButton" Content="中止" Click="Cancel_Click" Visibility="Collapsed" Margin="10,0,0,0"/><TextBlock x:Name="StatusText" Text="保存済みデータを表示します。更新はボタンを押したときだけ行います。" Foreground="#597183" VerticalAlignment="Center"/></DockPanel>
+  <DockPanel Grid.Row="2" Margin="0,18,0,0"><Button DockPanel.Dock="Right" x:Name="CancelButton" Content="中止" Click="Cancel_Click" Visibility="Collapsed" Margin="10,0,0,0"/><TextBlock x:Name="WebStatusText" DockPanel.Dock="Right" FontSize="12" Foreground="#597183" VerticalAlignment="Center" Margin="16,0,0,0" Visibility="Collapsed"/><TextBlock x:Name="StatusText" Text="保存済みデータを表示します。Riot APIの更新はボタンを押したときだけ行います。" Foreground="#597183" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/></DockPanel>
  </Grid>
 </Window>

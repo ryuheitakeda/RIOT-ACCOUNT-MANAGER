@@ -54,21 +54,67 @@ public sealed class WebStatsClient(HttpClient http, Func<string?> getBaseUrl)
     }
 }
 
-public sealed record WebSyncResult(int Imported, List<string> Skipped)
+public enum WebAccountImportState { Merged, Unchanged, Registered, PuuidMismatch, IdentityMismatch, Failed }
+
+public sealed record WebAccountImport(Guid Id, string Label, WebAccountImportState State, LolMergeResult? Merge = null, string? Reason = null)
 {
-    public string Message => Skipped.Count == 0
-        ? $"Web版から{Imported}件のアカウントを同期しました。"
-        : $"Web版から{Imported}件を同期しました。同期しなかったアカウント：{string.Join("、", Skipped)}";
+    public string Detail => State switch
+    {
+        WebAccountImportState.Merged => $"{Label}: 取り込み {Merge!.Summary}",
+        WebAccountImportState.Unchanged => $"{Label}: 変更なし",
+        _ => $"{Label}: {Reason}"
+    };
+}
+
+public enum WebImportState { Imported, Unchanged, ServerBusy }
+
+/// <summary>What one import from the web version did. Only <see cref="WebImportState.Imported"/> runs read the snapshot.</summary>
+public sealed record WebImportResult(WebImportState State, WebStatus Status, string Marker, DateTimeOffset At, List<WebAccountImport> Accounts)
+{
+    public int Ranks => Accounts.Sum(a => a.Merge?.Ranks ?? 0);
+    public int Matches => Accounts.Sum(a => a.Merge?.Matches ?? 0);
+    public int UpgradedMatches => Accounts.Sum(a => a.Merge?.UpgradedMatches ?? 0);
+    public int Opponents => Accounts.Sum(a => a.Merge?.Opponents ?? 0);
+    public int Forecasts => Accounts.Sum(a => a.Merge?.Forecasts ?? 0);
+    public int Registered => Accounts.Count(a => a.State == WebAccountImportState.Registered);
+    public int Skipped => Accounts.Count(a => IsSkip(a.State));
+
+    /// <summary>Counts only, e.g. "試合+5 ランク+3（2件）" or "変更なし".</summary>
+    public string Summary
+    {
+        get
+        {
+            var counts = LolMergeResult.Describe(Matches, UpgradedMatches, Ranks, Opponents, Forecasts);
+            return Accounts.Any(a => a.Merge?.Changes > 0) ? $"{counts}（{Accounts.Count(a => a.Merge?.Changes > 0)}件）" : counts;
+        }
+    }
+
+    public string Message => State switch
+    {
+        WebImportState.ServerBusy => "Web版が更新中のため、取り込みは完了後に行います。",
+        WebImportState.Unchanged => "Web版に新しい取得結果はありません。",
+        _ => $"Web版から取り込み：{Summary}" + (Registered > 0 ? $"／登録 {Registered}件" : "")
+            + (Skipped > 0 ? $"／未取込 {Skipped}件（{string.Join("・", SkipKinds.Where(k => Accounts.Any(a => a.State == k.State)).Select(k => k.Name))}）" : "")
+    };
+
+    /// <summary>One line per account, for a tooltip.</summary>
+    public string Detail => string.Join(Environment.NewLine, Accounts.Select(a => a.Detail));
+
+    private static readonly (WebAccountImportState State, string Name)[] SkipKinds =
+        [(WebAccountImportState.IdentityMismatch, "Riot ID相違"), (WebAccountImportState.PuuidMismatch, "PUUID相違"), (WebAccountImportState.Failed, "登録失敗")];
+    private static bool IsSkip(WebAccountImportState state) => SkipKinds.Any(k => k.State == state);
 }
 
 /// <summary>
-/// The WPF "Web" source. Refreshes run on the web server, the only caller of the Riot API, and their results are copied into the
-/// local store, so every view keeps reading saved data as before. Accounts are matched by ID (shared since the DB was migrated)
-/// and copied only while the Riot ID and server agree.
+/// The WPF side of the web version. Imports merge what the server has saved into the local store without asking it to
+/// refresh, so they never wait for the Riot API; refreshes (the "Web" source's buttons) run on the server, the only caller
+/// of the Riot API, and their results are merged back the same way. Accounts are matched by ID (shared since the DB was
+/// migrated) and only while the Riot ID and server agree.
 /// </summary>
-public sealed class WebStatsProvider(Store store, WebStatsClient client, TimeSpan? pollInterval = null) : IGameStatsProvider
+public sealed class WebStatsProvider(Store store, WebStatsClient client, TimeSpan? pollInterval = null, DiagnosticLog? log = null) : IGameStatsProvider
 {
     private readonly TimeSpan poll = pollInterval ?? TimeSpan.FromSeconds(1);
+    private const string Stage = "取り込み";
 
     public Task RefreshRanksAsync(RiotAccount account, CancellationToken cancellationToken, IProgress<string>? progress = null) =>
         RefreshAsync(account, new(account.Id, RanksOnly: true), progress, cancellationToken);
@@ -76,21 +122,57 @@ public sealed class WebStatsProvider(Store store, WebStatsClient client, TimeSpa
     public Task RefreshAnalysisAsync(RiotAccount account, string queue, int count, IProgress<string> progress, CancellationToken cancellationToken) =>
         RefreshAsync(account, new(account.Id, queue, count), progress, cancellationToken);
 
-    // Copies whatever the server has saved; no refresh is requested, so it never waits for the Riot API.
-    public async Task<WebSyncResult> SyncAllAsync(IProgress<string>? progress, CancellationToken ct)
+    /// <summary>
+    /// Merges the server's saved data into every local account. Without <paramref name="force"/> the snapshot is skipped while a
+    /// server job runs (its records are mid-write) or when the status marker still equals <paramref name="sinceMarker"/>.
+    /// Accounts the server does not know are registered with their non-secret fields so its next scheduled run covers them.
+    /// </summary>
+    public async Task<WebImportResult> ImportAllAsync(string? sinceMarker, bool force, IProgress<string>? progress, CancellationToken ct)
     {
-        progress?.Report("Web版から同期中…");
-        var remote = (await client.SnapshotAsync(ct)).Accounts.ToDictionary(a => a.Id);
-        var imported = 0;
-        var skipped = new List<string>();
-        foreach (var account in store.Accounts())
+        var timer = Stopwatch.StartNew();
+        log?.Write(Stage, "Web版 開始");
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            if (!remote.TryGetValue(account.Id, out var web)) skipped.Add($"{account.Label}（Web版に未登録）");
-            else if (!SameIdentity(account.Lol, web.Lol)) skipped.Add($"{account.Label}（Web版とRiot ID・サーバーが異なる）");
-            else { store.ReplaceLolData(account.Id, web.Lol.Puuid, web.Cache); imported++; }
+            progress?.Report("Web版の状態を確認中…");
+            var status = await client.StatusAsync(ct);
+            var now = DateTimeOffset.UtcNow;
+            if (!force && status.Current != null) { log?.Write(Stage, "Web版 更新中のため見送り"); return new(WebImportState.ServerBusy, status, status.ChangeMarker, now, []); }
+            if (!force && status.ChangeMarker == sinceMarker) { log?.Write(Stage, "Web版 変更なし"); return new(WebImportState.Unchanged, status, status.ChangeMarker, now, []); }
+            progress?.Report("Web版から取り込み中…");
+            var remote = (await client.SnapshotAsync(ct)).Accounts.ToDictionary(a => a.Id);
+            var accounts = new List<WebAccountImport>();
+            foreach (var account in store.Accounts())
+            {
+                ct.ThrowIfCancellationRequested();
+                accounts.Add(await ImportOne(account, remote, ct));
+            }
+            var result = new WebImportResult(WebImportState.Imported, status, status.ChangeMarker, now, accounts);
+            log?.Write(Stage, $"Web版 完了（{timer.ElapsedMilliseconds}ms 試合+{result.Matches} 補完{result.UpgradedMatches} ランク+{result.Ranks} 相手+{result.Opponents} 予測+{result.Forecasts} 登録{result.Registered} 未取込{result.Skipped}）");
+            return result;
         }
-        return new(imported, skipped);
+        catch (OperationCanceledException) { log?.Write(Stage, "Web版 中止"); throw; }
+        catch (Exception error) { log?.Write(Stage, $"Web版 失敗 {error.GetType().Name}"); throw; }
+    }
+
+    private async Task<WebAccountImport> ImportOne(RiotAccount account, Dictionary<Guid, WebAccount> remote, CancellationToken ct)
+    {
+        if (!remote.TryGetValue(account.Id, out var web))
+        {
+            // Registering lets the server's next scheduled run cover an account added here; credentials never leave this PC.
+            try { await client.SaveAccountAsync(account, ct); return new(account.Id, account.Label, WebAccountImportState.Registered, Reason: "Web版に登録しました。次回の自動更新から取得します。"); }
+            catch (WebSourceException error) { return new(account.Id, account.Label, WebAccountImportState.Failed, Reason: $"Web版に登録できません（{error.Message}）"); }
+        }
+        if (!SameIdentity(account.Lol, web.Lol)) return new(account.Id, account.Label, WebAccountImportState.IdentityMismatch, Reason: "Web版とRiot ID・サーバーが異なります。");
+        // The merge reads and rewrites the account's records, so it runs off the caller's (UI) thread.
+        var merge = await Task.Run(() => store.MergeLolData(account.Id, web.Lol.Puuid, web.Cache), ct);
+        return merge.Outcome switch
+        {
+            LolMergeOutcome.PuuidMismatch => new(account.Id, account.Label, WebAccountImportState.PuuidMismatch, merge,
+                OpggStatsProvider.Identity(store, account.Id)?.Puuid == account.Lol.Puuid
+                    ? "PUUIDがOP.GG由来です。取得元Riot APIで一度更新すると揃います。" : "PUUIDがWeb版と異なります（別のAPIキーの可能性）。"),
+            LolMergeOutcome.Merged => new(account.Id, account.Label, WebAccountImportState.Merged, merge),
+            _ => new(account.Id, account.Label, WebAccountImportState.Unchanged, merge)
+        };
     }
 
     private async Task RefreshAsync(RiotAccount account, WebRefreshRequest request, IProgress<string>? progress, CancellationToken ct)
@@ -111,10 +193,11 @@ public sealed class WebStatsProvider(Store store, WebStatsClient client, TimeSpa
         progress?.Report(job.Message ?? "更新しました。");
     }
 
+    // After a refresh the server's copy is authoritative, so a PUUID it re-resolved replaces the local one.
     private void Import(RiotAccount account, WebAccount web)
     {
         if (!SameIdentity(account.Lol, web.Lol)) throw new WebSourceException("Web版のRiot ID・サーバーがこのアカウントと異なるため、取り込みませんでした。");
-        store.ReplaceLolData(account.Id, web.Lol.Puuid, web.Cache);
+        store.MergeLolData(account.Id, web.Lol.Puuid, web.Cache, adoptServerPuuid: true);
     }
 
     // Read-only check of the server for the diagnosis dialog; nothing is saved and the server does not call Riot.
@@ -137,7 +220,7 @@ public sealed class WebStatsProvider(Store store, WebStatsClient client, TimeSpa
                 WebAccount web;
                 try { web = await client.AccountAsync(account.Id, ct); }
                 catch (WebSourceException error) when (error.StatusCode == HttpStatusCode.NotFound)
-                { throw new WebSourceException("Web版に未登録です。「戦績・分析更新」を押すか、アカウントを保存すると登録します。"); }
+                { throw new WebSourceException("Web版に未登録です。「Web版から取り込み」を押すか、アカウントを保存すると登録します。"); }
                 if (!SameIdentity(account.Lol, web.Lol)) throw new WebSourceException("Web版のRiot ID・サーバーがこのアカウントと異なります。");
                 var last = new[] { web.Cache.Ranks.LastOrDefault()?.ObservedAt, web.Cache.MatchesUpdatedAt }.Max();
                 return last is { } at ? $"登録済みです。最終取得 {at.ToLocalTime():yyyy/MM/dd HH:mm}" : "登録済みです。まだ取得していません。";

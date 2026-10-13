@@ -190,17 +190,67 @@ public sealed class Store
     }
 
     /// <summary>
-    /// Replaces the LoL PUUID and every saved LoL record with another copy of them (the web server's), keeping the account,
-    /// its other game profiles and its credentials. The identity (Riot ID, server) must already match; callers check it.
+    /// Merges another copy of the account's LoL records (the web server's) into the saved ones by record key, so observations
+    /// and matches that only exist locally survive. The identity (Riot ID, server) must already match; callers check it.
+    /// A different saved PUUID is rejected without writing unless <paramref name="adoptServerPuuid"/> is set, which then drops
+    /// the matches and opponents keyed by the old PUUID the way a Riot API re-resolution does. Nothing is written when the copy
+    /// adds nothing. The account document, its other game profiles and its credentials are never touched.
     /// </summary>
-    public void ReplaceLolData(Guid id, string? puuid, AccountCache cache)
+    public LolMergeResult MergeLolData(Guid id, string? puuid, AccountCache server, bool adoptServerPuuid = false)
     {
         var account = Accounts().SingleOrDefault(a => a.Id == id) ?? throw new InvalidOperationException("アカウントが見つかりません。");
+        var local = Cache(id);
+        var profile = account.Lol;
+        var filled = false; var replaced = false;
+        if (puuid != null && profile.Puuid == null) { profile = profile with { Puuid = puuid }; filled = true; }
+        else if (puuid != null && profile.Puuid != puuid)
+        {
+            if (!adoptServerPuuid) return new(LolMergeOutcome.PuuidMismatch);
+            profile = profile with { Puuid = puuid }; replaced = true;
+            local.Matches.Clear(); local.Opponents.Clear(); local.QueueUpdatedAt.Clear(); local.MatchesUpdatedAt = null;
+        }
+        var (ranks, newRanks) = Union(local.Ranks, server.Ranks, r => r.ObservedAt.UtcTicks);
+        var (opponents, newOpponents) = Union(local.Opponents, server.Opponents, o => $"{o.QueueType}:{o.Puuid}:{o.ObservedAt.UtcTicks}");
+        var (forecasts, newForecasts) = Union(local.Forecasts, server.Forecasts, f => $"{f.QueueType}:{f.CreatedAt.UtcTicks}");
+        var matches = local.Matches.ToDictionary(m => m.Id);
+        var newMatches = 0; var upgraded = 0;
+        foreach (var theirs in server.Matches.DistinctBy(m => m.Id))
+        {
+            if (!matches.TryGetValue(theirs.Id, out var mine)) { matches[theirs.Id] = theirs; newMatches++; continue; }
+            // The local copy wins; the server's only fills in what it lacks, and a recorded average tier is never rewritten.
+            var levels = !mine.LevelsRecorded && theirs.LevelsRecorded;
+            var tier = mine.AverageTier == null && theirs.AverageTier != null;
+            if (!levels && !tier) continue;
+            matches[theirs.Id] = (levels ? theirs : mine) with { AverageTier = mine.AverageTier ?? theirs.AverageTier };
+            upgraded++;
+        }
+        var advanced = false;
+        var matchesUpdatedAt = local.MatchesUpdatedAt;
+        if (server.MatchesUpdatedAt is { } at && (matchesUpdatedAt == null || at > matchesUpdatedAt)) { matchesUpdatedAt = at; advanced = true; }
+        var queueUpdatedAt = new Dictionary<string, DateTimeOffset>(local.QueueUpdatedAt);
+        foreach (var (queue, when) in server.QueueUpdatedAt)
+            if (!queueUpdatedAt.TryGetValue(queue, out var known) || when > known) { queueUpdatedAt[queue] = when; advanced = true; }
+        var result = new LolMergeResult(LolMergeOutcome.Merged, newRanks, newMatches, upgraded, newOpponents, newForecasts, filled, replaced);
+        if (!filled && !replaced && !advanced && result.Changes == 0) return result with { Outcome = LolMergeOutcome.Unchanged };
+        var merged = new AccountCache
+        {
+            Ranks = ranks, Matches = [.. matches.Values], Opponents = opponents, Forecasts = forecasts,
+            MatchesUpdatedAt = matchesUpdatedAt, QueueUpdatedAt = queueUpdatedAt
+        };
         using var c = Open(); using var tx = c.BeginTransaction();
-        Execute(c, tx, "UPDATE game_profiles SET json=$json WHERE account_id=$id AND game='lol'",
-            ("$id", id.ToString()), ("$json", JsonSerializer.Serialize(account.Lol with { Puuid = puuid }, Json)));
-        SaveCache(c, tx, id, cache);
+        if (filled || replaced) Execute(c, tx, "UPDATE game_profiles SET json=$json WHERE account_id=$id AND game='lol'",
+            ("$id", id.ToString()), ("$json", JsonSerializer.Serialize(profile, Json)));
+        SaveCache(c, tx, id, merged);
         tx.Commit();
+        return result;
+    }
+
+    private static (List<T> Items, int Added) Union<T, TKey>(List<T> local, List<T> server, Func<T, TKey> key) where TKey : notnull
+    {
+        var known = new HashSet<TKey>(local.Select(key));
+        var items = new List<T>(local); var added = 0;
+        foreach (var item in server) if (known.Add(key(item))) { items.Add(item); added++; }
+        return (items, added);
     }
 
     private static void SaveCache(SqliteConnection c, SqliteTransaction tx, Guid id, AccountCache cache)
@@ -289,4 +339,26 @@ public sealed class Store
         if (order != null && order.Remove(id)) WriteDocument(c, tx, "setting", AccountOrderKey, order);
         tx.Commit();
     }
+}
+
+public enum LolMergeOutcome { Unchanged, Merged, PuuidMismatch }
+
+/// <summary>What <see cref="Store.MergeLolData"/> added; counts are per record kind, never per-match LP changes.</summary>
+public sealed record LolMergeResult(LolMergeOutcome Outcome, int Ranks = 0, int Matches = 0, int UpgradedMatches = 0,
+    int Opponents = 0, int Forecasts = 0, bool PuuidFilled = false, bool PuuidReplaced = false)
+{
+    public int Changes => Ranks + Matches + UpgradedMatches + Opponents + Forecasts;
+
+    /// <summary>Counts in display form, e.g. "試合+5 補完2 ランク+3", or "変更なし".</summary>
+    public static string Describe(int matches, int upgradedMatches, int ranks, int opponents, int forecasts)
+    {
+        var parts = new List<string>();
+        if (matches > 0) parts.Add($"試合+{matches}");
+        if (upgradedMatches > 0) parts.Add($"補完{upgradedMatches}");
+        if (ranks > 0) parts.Add($"ランク+{ranks}");
+        if (opponents > 0) parts.Add($"相手+{opponents}");
+        if (forecasts > 0) parts.Add($"予測+{forecasts}");
+        return parts.Count == 0 ? "変更なし" : string.Join(" ", parts);
+    }
+    public string Summary => Describe(Matches, UpgradedMatches, Ranks, Opponents, Forecasts) + (PuuidFilled ? " PUUID補完" : PuuidReplaced ? " PUUID更新" : "");
 }
