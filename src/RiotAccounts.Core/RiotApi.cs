@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 
@@ -8,12 +9,24 @@ public sealed class RiotApiException(string message, HttpStatusCode? statusCode 
     public HttpStatusCode? StatusCode { get; } = statusCode;
 }
 
+/// <summary>
+/// The rate-limit headers of Riot's latest response for one host and route template. Limits and counts look like "20:1,100:120"
+/// (requests:seconds). Riot documents per-method limits nowhere public, so these headers are the only record of the key's real limits.
+/// </summary>
+public sealed record RateLimitObservation(string Host, string Route, DateTimeOffset ObservedAt, int Status,
+    string? AppLimit, string? AppCount, string? MethodLimit, string? MethodCount, string? LimitType, double? RetryAfterSeconds);
+
 public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog? log = null) : IDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Queue<DateTimeOffset> requests = [];
+    private readonly ConcurrentDictionary<string, RateLimitObservation> rateLimits = new();
     private DateTimeOffset retryNotBefore;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
+    // Only reports what Riot returned; the throttle below keeps its fixed budget.
+    public IReadOnlyList<RateLimitObservation> RateLimits =>
+        [.. rateLimits.Values.OrderBy(o => o.Host, StringComparer.Ordinal).ThenBy(o => o.Route, StringComparer.Ordinal)];
 
     public async Task<T> GetAsync<T>(string host, string path, CancellationToken ct, IProgress<string>? progress = null)
     {
@@ -83,7 +96,8 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog
         try
         {
             var response = await http.SendAsync(request, ct);
-            log?.Write("Riot API", $"{host} {route} -> HTTP {(int)response.StatusCode} ({timer.ElapsedMilliseconds}ms)");
+            var limits = Observe(host, route, response);
+            log?.Write("Riot API", $"{host} {route} -> HTTP {(int)response.StatusCode} ({timer.ElapsedMilliseconds}ms){limits}");
             return response;
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
@@ -92,6 +106,22 @@ public sealed class RiotApi(HttpClient http, Func<string?> getKey, DiagnosticLog
             throw;
         }
     }
+
+    // Records the rate-limit headers and returns them as a log suffix. A 429 without them is a service limit, so it is kept too.
+    private string Observe(string host, string route, HttpResponseMessage response)
+    {
+        string? Header(string name) => response.Headers.TryGetValues(name, out var values) ? Limit(string.Join(",", values)) : null;
+        var retry = response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow);
+        var observation = new RateLimitObservation(host, route, DateTimeOffset.UtcNow, (int)response.StatusCode,
+            Header("X-App-Rate-Limit"), Header("X-App-Rate-Limit-Count"), Header("X-Method-Rate-Limit"), Header("X-Method-Rate-Limit-Count"),
+            Header("X-Rate-Limit-Type"), retry?.TotalSeconds);
+        if (observation is { AppLimit: null, MethodLimit: null, LimitType: null } && response.StatusCode != HttpStatusCode.TooManyRequests) return "";
+        rateLimits[$"{host} {route}"] = observation;
+        return $" app={observation.AppLimit ?? "-"} ({observation.AppCount ?? "-"}) method={observation.MethodLimit ?? "-"} ({observation.MethodCount ?? "-"})"
+            + (observation.LimitType is { } type ? $" type={type}" : "");
+    }
+
+    private static string Limit(string value) => value.Length > 100 ? value[..100] : value;
 
     private async Task WaitForRateLimit(CancellationToken ct, IProgress<string>? progress)
     {

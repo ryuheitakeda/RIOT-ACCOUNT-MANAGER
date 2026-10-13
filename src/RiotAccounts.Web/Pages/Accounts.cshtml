@@ -1,0 +1,64 @@
+@page
+@model AccountsModel
+@{
+    ViewData["Title"] = "アカウント管理";
+}
+<div class="page-head">
+    <h1>アカウント管理</h1>
+</div>
+<p class="sub">ここで管理するのは表示名・Riot ID・サーバー・メモだけです。ログインIDとパスワードはWindowsアプリにだけ保存し、Web版には送りません。</p>
+
+<div class="grid two">
+    <section class="panel">
+        <h2>@(Model.Edit == null ? "追加" : "編集")</h2>
+        @if (Model.Error != null) { <p class="notice warn">@Model.Error</p> }
+        <form method="post" asp-page-handler="Save" class="form">
+            <input type="hidden" name="Edit" value="@Model.Edit" />
+            <label>表示名<input asp-for="Form.Label" required maxlength="50" autocomplete="off" /></label>
+            <div class="row">
+                <label class="grow">ゲーム名<input asp-for="Form.GameName" required autocomplete="off" /></label>
+                <label>タグ<input asp-for="Form.TagLine" required autocomplete="off" placeholder="JP1" /></label>
+            </div>
+            <label>サーバー
+                <select asp-for="Form.Platform">
+                    @foreach (var platform in AccountsModel.Platforms)
+                    {
+                        <option value="@platform">@platform</option>
+                    }
+                </select>
+            </label>
+            <label>メモ（任意・平文で保存。ログイン情報は書かないでください）<textarea asp-for="Form.Note" rows="2"></textarea></label>
+            <div class="row">
+                <button type="submit">@(Model.Edit == null ? "追加" : "保存")</button>
+                @if (Model.Edit != null) { <a class="button secondary" href="/Accounts">キャンセル</a> }
+            </div>
+        </form>
+    </section>
+
+    <section class="panel">
+        <h2>登録済み（表示順）</h2>
+        @if (Model.Accounts.Count == 0)
+        {
+            <p class="empty">まだありません。</p>
+        }
+        <ul class="accounts">
+            @for (var i = 0; i < Model.Accounts.Count; i++)
+            {
+                var account = Model.Accounts[i];
+                <li>
+                    <div class="grow">
+                        <strong>@account.Label</strong>
+                        <div class="sub">@account.RiotId ／ @account.Lol.Platform</div>
+                        @if (account.Note != null) { <div class="sub">@account.Note</div> }
+                    </div>
+                    <form method="post" asp-page-handler="Move" asp-route-id="@account.Id" asp-route-up="true"><button type="submit" class="icon" disabled="@(i == 0)" aria-label="上へ">↑</button></form>
+                    <form method="post" asp-page-handler="Move" asp-route-id="@account.Id" asp-route-up="false"><button type="submit" class="icon" disabled="@(i == Model.Accounts.Count - 1)" aria-label="下へ">↓</button></form>
+                    <a class="button secondary" href="/Accounts?edit=@account.Id">編集</a>
+                    <form method="post" asp-page-handler="Delete" asp-route-id="@account.Id" onsubmit="return confirm('このアカウントを削除しますか？保存済みの戦績も削除されます。');">
+                        <button type="submit" class="danger">削除</button>
+                    </form>
+                </li>
+            }
+        </ul>
+    </section>
+</div>

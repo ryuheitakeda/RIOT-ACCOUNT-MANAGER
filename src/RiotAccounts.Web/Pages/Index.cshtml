@@ -1,0 +1,38 @@
+@page
+@model IndexModel
+@{
+    ViewData["Title"] = "一覧";
+    ViewData["AutoReload"] = true;
+}
+<div class="page-head">
+    <h1>アカウント</h1>
+    <form method="post" asp-page-handler="RefreshAll"><button type="submit">今すぐ全件更新</button></form>
+</div>
+@if (Model.Rows.Count == 0)
+{
+    <p class="empty">アカウントがありません。<a href="/Accounts">アカウント管理</a>から追加してください。</p>
+}
+else
+{
+    <table class="list cards">
+        <thead>
+            <tr><th>表示名</th><th>Riot ID</th><th>Solo / Duo</th><th>Flex</th><th>最終プレイ</th><th>最終取得</th><th><span class="visually-hidden">操作</span></th></tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Model.Rows)
+            {
+                <tr>
+                    <td class="title"><a href="/Account/@row.Account.Id">@row.Account.Label</a>@if (row.Account.Note != null) { <div class="sub">@row.Account.Note</div> }</td>
+                    <td data-label="Riot ID">@row.Account.RiotId <span class="sub">@row.Account.Lol.Platform</span></td>
+                    <td data-label="Solo / Duo">@row.Solo</td>
+                    <td data-label="Flex">@row.Flex</td>
+                    <td data-label="最終プレイ">@row.LastPlayed</td>
+                    <td data-label="最終取得">@Format.Time(row.LastFetched)</td>
+                    <td class="actions">
+                        <form method="post" asp-page-handler="Refresh" asp-route-id="@row.Account.Id"><button type="submit" class="secondary">更新</button></form>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

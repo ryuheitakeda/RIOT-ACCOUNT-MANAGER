@@ -1,0 +1,44 @@
+@page
+@model ChampionsModel
+@{
+    ViewData["Title"] = "チャンピオン";
+    ViewData["AutoReload"] = true;
+}
+<div class="page-head">
+    <h1>全アカウントのチャンピオン別</h1>
+</div>
+<nav class="tabs" aria-label="キュー">
+    @foreach (var queue in Queues.Definitions)
+    {
+        <a class="@(queue.Key == Model.Queue ? "active" : "")" href="/Champions?queue=@queue.Key&count=@Model.Count">@queue.Name</a>
+    }
+    <span class="spacer"></span>
+    @foreach (var count in new[] { 20, 50 })
+    {
+        <a class="@(count == Model.Count ? "active" : "")" href="/Champions?queue=@Model.Queue&count=@count">直近@(count)戦</a>
+    }
+</nav>
+<p class="sub">登録済み@(Model.AccountCount)アカウントの保存済み戦績から、各アカウントの直近@(Model.Count)戦を合計します。複数の自アカウントが同じ試合に出た場合は、アカウントごとに1戦と数えます。</p>
+@if (Model.Rows.Count == 0)
+{
+    <p class="empty">まだ戦績がありません。</p>
+}
+else
+{
+    <table class="list numeric cards">
+        <thead><tr><th>チャンピオン</th><th>試合</th><th>勝率</th><th>KDA</th><th>CS/分</th><th>アカウント内訳</th></tr></thead>
+        <tbody>
+            @foreach (var row in Model.Rows)
+            {
+                <tr>
+                    <td class="title">@row.Total.Name</td>
+                    <td data-label="試合">@row.Total.Games</td>
+                    <td data-label="勝率">@row.Total.WinRate.ToString("F0")%</td>
+                    <td data-label="KDA">@row.Total.Kda.ToString("F2")</td>
+                    <td data-label="CS/分">@row.Total.CsPerMinute.ToString("F1")</td>
+                    <td data-label="内訳" class="sub">@row.Breakdown</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

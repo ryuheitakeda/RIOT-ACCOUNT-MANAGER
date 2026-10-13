@@ -66,6 +66,12 @@ Riotクライアントで別アカウントからログアウトしてから、�
 - 「次戦の参考ランク帯」は Riot API 利用時のみ算出します。
 - 取得元を切り替えても保存済みの戦績は保持し、同じ試合は Riot API のデータを優先して1件として集計します。
 
+## Web版（自宅サーバー）
+
+Riot APIの取得制限で待たされないように、常時起動のMacでWeb版を常駐させ、6時間ごとに全アカウントのSolo/Duo・Flex・ノーマルを取得できます。ブラウザ（tailnet内のスマホ・PC）でランク・戦績・推移・次戦の参考ランク帯・全アカウントのチャンピオン別を確認できます。閲覧時はRiot APIを呼びません。ログイン補助はWindowsアプリだけの機能です。
+
+配備・初回設定・Windowsアプリからのデータ移行・Riot APIの制限は `docs/web-server.md` を参照してください。
+
 ## 保存先
 
 `%LOCALAPPDATA%\RiotAccounts\accounts.db` に保存します。ログイン情報・APIキーはWindows DPAPIで暗号化し、登録したWindowsユーザーで復号します。別のユーザーやPCにDBだけを移しても復号できません。試合・ランク情報、管理名、メモはローカルDBに通常データとして保存します（メモは暗号化しないため、ログイン情報を書かないでください）。
@@ -79,6 +85,7 @@ Riotクライアントで別アカウントからログアウトしてから、�
 ```powershell
 dotnet test tests/RiotAccounts.Core.Tests -c Release
 dotnet build src/RiotAccounts.App -c Release
+dotnet build src/RiotAccounts.Web -c Release
 powershell -ExecutionPolicy Bypass -File scripts/publish.ps1
 ```
 

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by scripts/deploy-web.sh from server/deploy.env; {{...}} are filled in there. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{LABEL}}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{APP}}/RiotAccounts.Web</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{{APP}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ASPNETCORE_ENVIRONMENT</key>
+    <string>Production</string>
+    <key>ASPNETCORE_URLS</key>
+    <string>http://127.0.0.1:{{PORT}}</string>
+    <key>AllowedHosts</key>
+    <string>{{HOSTS}}</string>
+    <key>RiotWeb__DataDir</key>
+    <string>{{DATA}}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>{{LOGS}}/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{LOGS}}/server-error.log</string>
+</dict>
+</plist>

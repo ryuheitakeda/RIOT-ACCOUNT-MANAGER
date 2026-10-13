@@ -1,0 +1,54 @@
+@inject RefreshWorker Worker
+@inject ApiKey Key
+@{
+    var current = Worker.Current;
+    var registered = Key.Registered;
+    var next = Worker.NextDue;
+    var nextText = !registered ? "APIキー登録後" : next <= DateTimeOffset.UtcNow ? "まもなく" : Format.Time(next);
+    var path = Context.Request.Path.Value ?? "/";
+    string Active(string prefix) => prefix == "/" ? (path == "/" ? "active" : "") : path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? "active" : "";
+}
+<!doctype html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>@(ViewData["Title"] is string title ? $"{title} · Riot Accounts" : "Riot Accounts")</title>
+    <link rel="icon" href="~/favicon.ico">
+    <link rel="stylesheet" href="~/site.css" asp-append-version="true">
+</head>
+<body data-autoreload="@(ViewData["AutoReload"] is true ? "true" : "false")">
+    <header class="masthead">
+        <a class="brand" href="/">Riot Accounts</a>
+        <nav>
+            <a class="@Active("/")" href="/">一覧</a>
+            <a class="@Active("/Champions")" href="/Champions">チャンピオン</a>
+            <a class="@Active("/Accounts")" href="/Accounts">アカウント管理</a>
+            <a class="@Active("/Settings")" href="/Settings">設定</a>
+        </nav>
+    </header>
+    <section class="status" aria-live="polite">
+        @if (!registered)
+        {
+            <p class="notice warn">Riot APIキーが未登録です。<a href="/Settings">設定</a>で登録すると自動更新が始まります。</p>
+        }
+        @if (current != null)
+        {
+            <p class="notice running" data-job-running><span class="spinner" aria-hidden="true"></span>更新中: <span data-progress>@(current.Progress ?? "開始しています…")</span></p>
+        }
+        else
+        {
+            <p class="muted">自動更新 前回: @Format.Run(Worker.LastRun) ／ 次回: @nextText @if (Worker.QueuedCount > 0) { <span>／ 待機中 @Worker.QueuedCount 件</span> }</p>
+        }
+        @if (TempData["Message"] is string message)
+        {
+            <p class="notice">@message</p>
+        }
+    </section>
+    <main>
+        @RenderBody()
+    </main>
+    @await RenderSectionAsync("Scripts", required: false)
+    <script src="~/app.js" asp-append-version="true"></script>
+</body>
+</html>

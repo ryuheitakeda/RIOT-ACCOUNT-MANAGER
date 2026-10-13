@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/RiotAccounts.App/RiotAccounts.App.csproj" />
     <Project Path="src/RiotAccounts.Core/RiotAccounts.Core.csproj" />
+    <Project Path="src/RiotAccounts.Web/RiotAccounts.Web.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/RiotAccounts.Core.Tests/RiotAccounts.Core.Tests.csproj" />
