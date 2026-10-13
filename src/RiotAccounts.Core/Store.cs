@@ -189,6 +189,20 @@ public sealed class Store
         tx.Commit();
     }
 
+    /// <summary>
+    /// Replaces the LoL PUUID and every saved LoL record with another copy of them (the web server's), keeping the account,
+    /// its other game profiles and its credentials. The identity (Riot ID, server) must already match; callers check it.
+    /// </summary>
+    public void ReplaceLolData(Guid id, string? puuid, AccountCache cache)
+    {
+        var account = Accounts().SingleOrDefault(a => a.Id == id) ?? throw new InvalidOperationException("アカウントが見つかりません。");
+        using var c = Open(); using var tx = c.BeginTransaction();
+        Execute(c, tx, "UPDATE game_profiles SET json=$json WHERE account_id=$id AND game='lol'",
+            ("$id", id.ToString()), ("$json", JsonSerializer.Serialize(account.Lol with { Puuid = puuid }, Json)));
+        SaveCache(c, tx, id, cache);
+        tx.Commit();
+    }
+
     private static void SaveCache(SqliteConnection c, SqliteTransaction tx, Guid id, AccountCache cache)
     {
         var key = id.ToString();
