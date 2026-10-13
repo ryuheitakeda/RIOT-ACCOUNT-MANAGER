@@ -23,7 +23,12 @@ public sealed record WebJob(Guid Id, string State, string? Progress, string? Mes
 }
 
 public sealed record WebStatus(string Version, bool KeyRegistered, WebJob? Current, int Queued, RefreshResult? LastRun,
-    DateTimeOffset NextDue, double IntervalHours, List<RateLimitObservation> RateLimits);
+    DateTimeOffset NextDue, double IntervalHours, List<RateLimitObservation> RateLimits, DateTimeOffset? LastChangedAt = null)
+{
+    // Moves whenever a job finished or an account changed on the server (kept in memory there, so null after a restart).
+    // A server without the field only reports full runs, which still covers the six-hourly refresh.
+    [JsonIgnore] public string ChangeMarker => $"{LastChangedAt?.UtcTicks ?? 0}:{LastRun?.CompletedAt.UtcTicks ?? 0}";
+}
 
 // Error body of every failed API call; the message is Japanese and ready to show.
 public sealed record WebError(string Message);

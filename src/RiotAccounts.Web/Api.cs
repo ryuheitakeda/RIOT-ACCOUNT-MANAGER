@@ -56,6 +56,7 @@ public static class AccountEdits
             throw new InvalidOperationException("更新中はRiot IDとサーバーを変更できません。更新の完了後にもう一度保存してください。");
         var note = string.IsNullOrWhiteSpace(input.Note) ? null : input.Note.Trim();
         store.Save(new RiotAccount(id, label, [.. existing?.Profiles.Where(p => p.Game != "lol") ?? [], lol], note));
+        worker.MarkChanged();
         return store.Accounts().Single(a => a.Id == id);
     }
 
@@ -63,6 +64,7 @@ public static class AccountEdits
     {
         if (worker.Touches(id)) throw new InvalidOperationException("更新中のアカウントは削除できません。更新の完了後に削除してください。");
         store.Delete(id);
+        worker.MarkChanged();
     }
 
     private static bool SameIdentity(GameProfile left, GameProfile right) =>

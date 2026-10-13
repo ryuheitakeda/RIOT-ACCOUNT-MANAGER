@@ -25,6 +25,7 @@ public sealed class RefreshWorker(Store store, LolStatsProvider provider, RiotAp
     private readonly DateTimeOffset startedAt = DateTimeOffset.UtcNow;
     private Guid? running;
     private volatile bool keyChanged;
+    private DateTimeOffset? lastChangedAt;
 
     public static string Version { get; } =
         typeof(RefreshWorker).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
@@ -36,7 +37,11 @@ public sealed class RefreshWorker(Store store, LolStatsProvider provider, RiotAp
     public int QueuedCount => jobs.Values.Count(e => e.View.State == WebJob.Queued);
     public WebJob? Job(Guid id) => jobs.TryGetValue(id, out var entry) ? entry.View : null;
     public void KeyChanged() => keyChanged = true;
-    public WebStatus Status() => new(Version, key.Registered, Current, QueuedCount, LastRun, NextDue, settings.RefreshIntervalHours, RateLimits());
+    // Moves when a job finished or an account was edited, so the WPF app can skip the snapshot while nothing changed.
+    // Kept in memory only: after a restart clients see null and import once.
+    public void MarkChanged() { lock (gate) lastChangedAt = DateTimeOffset.UtcNow; }
+    private DateTimeOffset? LastChangedAt { get { lock (gate) return lastChangedAt; } }
+    public WebStatus Status() => new(Version, key.Registered, Current, QueuedCount, LastRun, NextDue, settings.RefreshIntervalHours, RateLimits(), LastChangedAt);
 
     // The latest observation per host and route, kept across restarts.
     public List<RateLimitObservation> RateLimits() =>
@@ -129,6 +134,8 @@ public sealed class RefreshWorker(Store store, LolStatsProvider provider, RiotAp
         lock (gate)
         {
             running = null;
+            // A failed job may have saved some steps, so every finished job counts as a change.
+            lastChangedAt = DateTimeOffset.UtcNow;
             Update(id, j => j with { State = state, Message = message, FinishedAt = DateTimeOffset.UtcNow });
             foreach (var old in jobs.Values.Where(e => e.View.Finished).OrderByDescending(e => e.View.FinishedAt).Skip(KeptJobs).ToList())
                 jobs.TryRemove(old.View.Id, out _);

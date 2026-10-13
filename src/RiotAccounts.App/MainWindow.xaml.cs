@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace RiotAccounts.App;
 public sealed record AccountItem(RiotAccount Account,AccountOverview Overview)
@@ -17,7 +19,7 @@ public partial class MainWindow:Window
 {
     private readonly Store store;
     private readonly string folder;
-    private readonly HttpClient http=new(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(30)};
+    private readonly HttpClient http=new(new HttpClientHandler{AllowAutoRedirect=false,AutomaticDecompression=System.Net.DecompressionMethods.All}){Timeout=TimeSpan.FromSeconds(30)};
     private readonly RiotApi api;
     private readonly LolStatsProvider riotProvider;
     private readonly OpggApi opggApi;
@@ -37,6 +39,15 @@ public partial class MainWindow:Window
     private readonly NativeLogin login;
     private CancellationTokenSource? operation;
     private bool initialized;
+    // Web版 imports: a cheap status probe every five minutes, an import shortly after sleep ends, and the server marker last applied.
+    private readonly DispatcherTimer webTimer=new(){Interval=TimeSpan.FromMinutes(5)};
+    private readonly DispatcherTimer webResumeTimer=new(){Interval=TimeSpan.FromSeconds(20)};
+    private string? webMarker;
+    private WebStatus? webStatus;
+    private string? webProblem;
+    private WebImportResult? lastImport;
+    private bool closeRequested;
+    private bool WebConfigured=>WebStatsClient.BaseUri(store.Read<string>("setting","webServerUrl"))!=null;
     private Dictionary<Guid,AccountOverview> overviews=[];
     private RiotAccount? Selected=>(AccountsList.SelectedItem as AccountItem)?.Account;
     private string Queue=>QueuePicker.SelectedValue as string??Queues.Solo;
@@ -47,12 +58,13 @@ public partial class MainWindow:Window
         api=new(http,()=>store.GetSecret("riot-api-key"),log);riotProvider=new(store,api);opggApi=new(http,null,log);opggProvider=new(store,opggApi);login=new(store,log);
         riotLogged=new LoggedStatsProvider(riotProvider,"Riot API",log);opggLogged=new LoggedStatsProvider(opggProvider,"OP.GG",log);
         diagnostics=new(api,opggApi,()=>store.GetSecret("riot-api-key"),log);
-        webClient=new(http,()=>store.Read<string>("setting","webServerUrl"));webProvider=new(store,webClient);webLogged=new LoggedStatsProvider(webProvider,"Web版",log);
-        // Copying the web version's saved data calls no Riot API, so it runs at every start instead of waiting for a manual refresh.
-        Loaded+=async(_,_)=>{if(Source=="web")await Run(SyncFromWeb);};
+        webClient=new(http,()=>store.Read<string>("setting","webServerUrl"));webProvider=new(store,webClient,log:log);webLogged=new LoggedStatsProvider(webProvider,"Web版",log);
+        // Importing the web version's saved data calls no Riot API, so it runs at every start, after sleep and whenever the server reports new data.
+        webTimer.Tick+=WebTimer_Tick;webResumeTimer.Tick+=WebResumeTimer_Tick;
+        Loaded+=async(_,_)=>{webTimer.Start();SystemEvents.PowerModeChanged+=PowerModeChanged;if(WebConfigured)await Run(ImportFromWeb);};
         InitializeComponent();QueuePicker.ItemsSource=Queues.Definitions;QueuePicker.SelectedValue=Queues.Solo;initialized=true;Reload();
-        Closing+=(_,e)=>{if(operation!=null){operation.Cancel();e.Cancel=true;StatusText.Text="処理を中止しています。終了後にもう一度閉じてください。";}};
-        Closed+=(_,_)=>{ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
+        Closing+=(_,e)=>{if(operation!=null){operation.Cancel();closeRequested=true;e.Cancel=true;StatusText.Text="処理を中止しています。終了後に閉じます。";}};
+        Closed+=(_,_)=>{SystemEvents.PowerModeChanged-=PowerModeChanged;webTimer.Stop();webResumeTimer.Stop();ClipboardLease.ClearOwned();api.Dispose();opggApi.Dispose();http.Dispose();};
     }
     // Searching only filters, so it reuses the overviews instead of reading every cache per keystroke.
     private void Reload(Guid? select=null,bool keepOverviews=false)
@@ -60,7 +72,7 @@ public partial class MainWindow:Window
         var selectedId=select??Selected?.Id;var search=Search.Text.Trim();var accounts=store.Accounts();
         if(!keepOverviews||accounts.Any(a=>!overviews.ContainsKey(a.Id))){var now=DateTimeOffset.Now;overviews=accounts.ToDictionary(a=>a.Id,a=>Analytics.Overview(store.Cache(a.Id),now));}
         var list=accounts.Where(a=>a.Label.Contains(search,StringComparison.CurrentCultureIgnoreCase)||a.RiotId.Contains(search,StringComparison.CurrentCultureIgnoreCase)||(a.Note?.Contains(search,StringComparison.CurrentCultureIgnoreCase)??false)).Select(a=>new AccountItem(a,overviews[a.Id])).ToList();
-        AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();UpdateAccountReorderingAvailability();
+        AccountsList.ItemsSource=list;AccountsList.SelectedItem=list.FirstOrDefault(a=>a.Account.Id==selectedId)??list.FirstOrDefault();Render();UpdateAccountReorderingAvailability();UpdateWebControls();
     }
     private void Render()
     {
@@ -187,7 +199,7 @@ public partial class MainWindow:Window
         catch(System.Text.Json.JsonException){StatusText.Text="受信データまたは設定ファイルを読み取れません。設定を確認して再試行してください。";}
         catch(Exception ex) when(ex is RiotApiException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception or System.Windows.Automation.ElementNotAvailableException or ExternalException)
         {StatusText.Text=ex is RiotApiException or InvalidOperationException?ex.Message+SourceHint(ex):"操作に失敗しました。入力内容・Windows権限を確認してください。";}
-        finally{status.Active=false;operation.Dispose();operation=null;CancelButton.Visibility=Visibility.Collapsed;Reload();}
+        finally{status.Active=false;operation.Dispose();operation=null;CancelButton.Visibility=Visibility.Collapsed;Reload();if(closeRequested)Close();}
     }
     // Progress<T> posts asynchronously, so a report queued just before a synchronous failure
     // would overwrite the error message. Apply UI-thread reports immediately and drop late ones.
@@ -219,11 +231,53 @@ public partial class MainWindow:Window
     // Registers an added or edited account with the web version so its scheduled refresh covers it. Credentials are never sent.
     private async void PushToWeb(Guid id)
     {
-        if(Source!="web"||store.Accounts().SingleOrDefault(a=>a.Id==id) is not{} account)return;
+        if(!WebConfigured||store.Accounts().SingleOrDefault(a=>a.Id==id) is not{} account)return;
         try{await webClient.SaveAccountAsync(account,CancellationToken.None);StatusText.Text=$"「{account.Label}」をWeb版にも登録しました。";}
         catch(Exception ex) when(ex is InvalidOperationException or OperationCanceledException){StatusText.Text=$"Web版への登録に失敗しました（{ex.Message}）。更新時にもう一度登録します。";}
     }
-    private async Task SyncFromWeb(IProgress<string> progress,CancellationToken ct)=>progress.Report((await webProvider.SyncAllAsync(progress,ct)).Message);
+    private Task ImportFromWeb(IProgress<string> progress,CancellationToken ct)=>ImportFromWebCore(progress,ct,force:true);
+    private Task ImportFromWebIfChanged(IProgress<string> progress,CancellationToken ct)=>ImportFromWebCore(progress,ct,force:false);
+    private async Task ImportFromWebCore(IProgress<string> progress,CancellationToken ct,bool force)
+    {
+        var result=await webProvider.ImportAllAsync(webMarker,force,progress,ct);
+        webStatus=result.Status;webProblem=null;
+        if(result.State==WebImportState.Imported){lastImport=result;webMarker=result.Marker;}
+        progress.Report(result.Message);
+    }
+    private async void ImportFromWeb_Click(object sender,RoutedEventArgs e)=>await Run(ImportFromWeb);
+    // Probes the server's small status outside Run, so the UI is only reloaded when there is something to import.
+    private async void WebTimer_Tick(object? sender,EventArgs e)
+    {
+        if(operation!=null||!WebConfigured||OwnedWindows.Count>0)return;
+        WebStatus status;
+        try{using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(15));status=await webClient.StatusAsync(timeout.Token);}
+        catch(Exception ex) when(ex is InvalidOperationException or OperationCanceledException or ObjectDisposedException){webProblem=$"Web版: 接続できません（{DateTime.Now:HH:mm}）";ShowWebStatus();return;}
+        webStatus=status;webProblem=null;
+        if(status.Current!=null||status.ChangeMarker==webMarker){ShowWebStatus();return;}
+        if(operation==null&&OwnedWindows.Count==0)await Run(ImportFromWebIfChanged);
+    }
+    // SystemEvents raises on its own thread, and the network is rarely back the moment the PC wakes, so the import waits a little.
+    private void PowerModeChanged(object sender,PowerModeChangedEventArgs e)
+    {
+        if(e.Mode==PowerModes.Resume)Dispatcher.BeginInvoke(()=>{webTimer.Stop();webTimer.Start();webResumeTimer.Stop();webResumeTimer.Start();});
+    }
+    private async void WebResumeTimer_Tick(object? sender,EventArgs e)
+    {
+        webResumeTimer.Stop();
+        if(operation==null&&WebConfigured)await Run(ImportFromWeb);
+    }
+    private void UpdateWebControls(){ImportFromWebButton.Visibility=WebConfigured?Visibility.Visible:Visibility.Collapsed;ShowWebStatus();}
+    // "前回の自動更新" is the server's last full run; its change marker also moves on account edits, so it only drives the import check.
+    private void ShowWebStatus()
+    {
+        if(!WebConfigured){WebStatusText.Visibility=Visibility.Collapsed;return;}
+        WebStatusText.Visibility=Visibility.Visible;
+        var status=webStatus;
+        var server=webProblem??(status==null?"Web版: 未確認":status.Current!=null?"Web版: 更新中（取り込みは完了後）":status.LastRun==null?"Web版: 自動更新はまだ実行されていません":
+            $"Web版: 前回の自動更新 {status.LastRun.CompletedAt.LocalDateTime:MM/dd HH:mm}（次回 {(status.NextDue<=DateTimeOffset.UtcNow?"まもなく":status.NextDue.LocalDateTime.ToString("MM/dd HH:mm"))}）");
+        WebStatusText.Text=lastImport==null?server:$"{server}／取り込み {lastImport.At.LocalDateTime:HH:mm} {lastImport.Summary}";
+        WebStatusText.ToolTip=lastImport?.Detail is{Length:>0} detail?detail:null;
+    }
     private void Delete_Click(object sender,RoutedEventArgs e)
     {
         if(operation!=null||Selected is not{} a)return;
@@ -284,7 +338,7 @@ public partial class MainWindow:Window
             string? clientPath;
             try{clientPath=login.ClientPath();}catch(Exception ex) when(ex is System.Text.Json.JsonException or IOException){clientPath=null;}
             var dialog=new SettingsDialog(store,clientPath,folder){Owner=this};
-            dialog.ShowDialog();Render();
+            dialog.ShowDialog();Render();UpdateWebControls();
             if(dialog.SetupRequested)
             {
                 var setup=new LoginSetupDialog(store,login,clientPath){Owner=this};
@@ -294,6 +348,6 @@ public partial class MainWindow:Window
         }
         catch(Exception ex) when(ex is CryptographicException or Microsoft.Data.Sqlite.SqliteException)
         {StatusText.Text="設定を開けません。保存先と、登録したWindowsユーザーを確認してください。";return;}
-        if(Source=="web"&&before!=(Source,store.Read<string>("setting","webServerUrl")))await Run(SyncFromWeb);
+        if(WebConfigured&&before!=(Source,store.Read<string>("setting","webServerUrl")))await Run(ImportFromWeb);
     }
 }
